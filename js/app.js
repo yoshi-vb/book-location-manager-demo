@@ -32,6 +32,7 @@
     mobileDestMode: "HQ", // "HQ" | "WAREHOUSE"
     mobileCandidates: [],
     mobileLastMatchInfo: null,
+    mobileScannedBatches: [], // 連続スキャンで検出された候補グループを消さずに蓄積する配列
     mobileSelectedList: [],
     mobileQrChunks: [],
     mobileQrPageIndex: 0,
@@ -132,6 +133,9 @@
         if (Array.isArray(parsed.selectedList)) {
           state.mobileSelectedList = parsed.selectedList;
         }
+        if (Array.isArray(parsed.scannedBatches)) {
+          state.mobileScannedBatches = parsed.scannedBatches;
+        }
         if (parsed.destMode) state.mobileDestMode = parsed.destMode;
         if (parsed.hqLocation) {
           document.getElementById("mobileHqLocationInput").value = parsed.hqLocation;
@@ -142,6 +146,7 @@
       }
     } catch (_) {
       state.mobileSelectedList = [];
+      state.mobileScannedBatches = [];
     }
 
     // カタログデータの復元（分離されたストレージキーから読込）
@@ -180,9 +185,11 @@
     setMobileDestinationMode(state.mobileDestMode);
     refreshAllViews();
 
-    // 初期状態で添付書籍1の模擬OCR候補を表示しておき、開いてすぐ体験できるようにする
-    if (state.mockOcrCases.length > 0) {
+    // 初期状態でスキャンストックが空なら、添付書籍1の模擬OCR候補を1件入れておき、すぐ体験できるようにする
+    if (state.mobileScannedBatches.length === 0 && state.mockOcrCases.length > 0) {
       runMockOcrByIndex(0, true);
+    } else {
+      renderCandidatesList();
     }
   }
 
@@ -203,6 +210,7 @@
         hqLocation: document.getElementById("mobileHqLocationInput").value,
         boxNumber: document.getElementById("mobileBoxNumberInput").value,
         selectedList: state.mobileSelectedList,
+        scannedBatches: state.mobileScannedBatches.slice(0, 20),
         savedAt: new Date().toISOString()
       };
       localStorage.setItem(STORAGE_KEYS.MOBILE_SESSION, JSON.stringify(payload));
@@ -377,65 +385,131 @@
     }
   }
 
-  function executeOcrTextMatch(rawText, sourceLabel = "【OCR読取結果】") {
+  /**
+   * OCRテキスト照合を実行し、結果を「スキャン検出候補ストック（mobileScannedBatches）」に蓄積する。
+   * 重要:
+   * - isContinuousCamera=true（カメラの2.2秒連続ループ）のときに「候補なし（NO_CANDIDATE）」だった場合は、
+   *   すでにスキャンできた画面上の候補リストを絶対に消さず、そのまま保持する！
+   * - 1冊目、2冊目、3冊目と連続して複数の奥付をスキャンした際、それぞれの候補グループが消えずにストックされるため、
+   *   複数冊スキャンし終えたあとにまとめて確認・選択・保管場所確定ができる。
+   */
+  function executeOcrTextMatch(rawText, sourceLabel = "【OCR読取結果】", options = {}) {
+    const isContinuousCamera = Boolean(options.isContinuousCamera);
     const matchResult = Core.matchBooksFromOcr(rawText, state.catalogBooks);
+
+    // 連続カメラの自動フレーム解析で候補が見つからなかった場合は、既存の表示・ストックをキャンセル（上書き消去）しない
+    if (isContinuousCamera && matchResult.candidates.length === 0) {
+      return { matched: false, count: 0 };
+    }
+
     state.mobileLastMatchInfo = {
       sourceLabel,
       ...matchResult
     };
     state.mobileCandidates = matchResult.candidates;
+
+    if (matchResult.candidates.length > 0) {
+      pushToScannedBatches({
+        sourceLabel,
+        status: matchResult.status,
+        statusLabel: matchResult.statusLabel,
+        candidates: matchResult.candidates,
+        detectedAt: new Date().toLocaleTimeString()
+      });
+    }
+
     renderCandidatesList();
+    return { matched: matchResult.candidates.length > 0, count: matchResult.candidates.length };
+  }
+
+  /**
+   * 連続スキャンされた候補バッチを重複なくストック先頭に追加する
+   */
+  function pushToScannedBatches(batchObj) {
+    const key = batchObj.candidates.map((c) => c.book.book_id).sort().join(",");
+    if (!key) return;
+
+    // すでに同じ候補セット（同じISBN/同じ図書群）がストックにあれば、時刻とラベルを更新して先頭へ移動（消えない）
+    const existingIdx = state.mobileScannedBatches.findIndex(
+      (b) => b.key === key
+    );
+    const entry = {
+      batchId: "SCAN-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6),
+      key,
+      sourceLabel: batchObj.sourceLabel,
+      status: batchObj.status,
+      statusLabel: batchObj.statusLabel,
+      candidates: batchObj.candidates,
+      detectedAt: batchObj.detectedAt || new Date().toLocaleTimeString()
+    };
+
+    if (existingIdx !== -1) {
+      state.mobileScannedBatches.splice(existingIdx, 1);
+    }
+    state.mobileScannedBatches.unshift(entry);
+    saveMobileSessionToStorage();
   }
 
   function executeMobileManualSearch(queryText) {
     const results = Core.searchBooksManually(queryText, state.catalogBooks);
-    state.mobileLastMatchInfo = {
-      sourceLabel: `【手動キーワード検索: "${queryText || "全件"}"】`,
-      status: results.length === 0 ? "NO_CANDIDATE" : results.length === 1 ? "CANDIDATES_FOUND" : "MULTIPLE_CANDIDATES",
-      statusLabel:
-        results.length === 0
-          ? `「${queryText}」に一致する図書は見つかりませんでした。別のキーワードをお試しください。`
-          : `手動検索で ${results.length} 件ヒットしました（表示上限30件）。図書登録番号を確認して「選択」を押してください。`,
-      requiresManualCheck: true
-    };
-    state.mobileCandidates = results.slice(0, 30).map((b) => ({
+    const status =
+      results.length === 0
+        ? "NO_CANDIDATE"
+        : results.length === 1
+        ? "CANDIDATES_FOUND"
+        : "MULTIPLE_CANDIDATES";
+    const statusLabel =
+      results.length === 0
+        ? `「${queryText}」に一致する図書は見つかりませんでした。別のキーワードをお試しください。`
+        : `手動検索で ${results.length} 件ヒットしました（表示上限30件）。図書登録番号を確認して「選択」を押してください。`;
+
+    const candidates = results.slice(0, 30).map((b) => ({
       book: b,
       score: 100,
       isExactIsbnHit: false,
       isFuzzyHit: false,
       reasons: ["手動検索ヒット"]
     }));
+
+    state.mobileLastMatchInfo = {
+      sourceLabel: `【手動キーワード検索: "${queryText || "全件"}"】`,
+      status,
+      statusLabel,
+      requiresManualCheck: true
+    };
+    state.mobileCandidates = candidates;
+
+    if (candidates.length > 0) {
+      pushToScannedBatches({
+        sourceLabel: `【手動検索: "${queryText || "全件"}"】`,
+        status,
+        statusLabel,
+        candidates
+      });
+    }
+
     renderCandidatesList();
   }
 
-  // 候補カードの描画
+  // 連続スキャン候補ストック＆候補カードの描画（カメラが外れても絶対に消えない）
   function renderCandidatesList() {
     const banner = document.getElementById("matchStatusBanner");
     const container = document.getElementById("candidatesContainer");
+    const batchCountSpan = document.getElementById("scannedBatchCount");
     if (!banner || !container) return;
 
+    if (batchCountSpan) {
+      batchCountSpan.textContent = String(state.mobileScannedBatches.length);
+    }
+
     const info = state.mobileLastMatchInfo;
-    if (!info) {
+    if (state.mobileScannedBatches.length === 0 && (!info || state.mobileCandidates.length === 0)) {
       banner.className = "alert alert-info";
-      banner.textContent = "奥付の読取または手動検索を実行すると、ここに候補が表示されます。";
-      container.innerHTML = "";
-      return;
-    }
-
-    if (info.status === "NO_CANDIDATE") {
-      banner.className = "alert alert-danger";
-    } else if (info.status === "MULTIPLE_CANDIDATES" || info.status === "MANUAL_CHECK_REQUIRED") {
-      banner.className = "alert alert-warning";
-    } else {
-      banner.className = "alert alert-success";
-    }
-
-    banner.innerHTML = `<strong>${escapeHtml(info.sourceLabel)} ${escapeHtml(info.status)}</strong><br/>${escapeHtml(info.statusLabel)}`;
-
-    if (state.mobileCandidates.length === 0) {
+      banner.innerHTML =
+        "カメラで複数の奥付を連続スキャンすると、読み取れた候補が<strong>消えずにここへ次々とストック（蓄積）</strong>されます。<br/>複数冊スキャンし終えたあとに、各候補の「選択」ボタンを押して登録できます。";
       container.innerHTML = `
         <div style="text-align:center; padding:16px; background:var(--bg-subtle); border-radius:8px;">
-          <p style="margin:0 0 10px 0; font-size:0.9rem;">候補が見つかりませんでした。ISBNがない図書やOCRが読み取りづらい場合は手動検索へ切り替えてください。</p>
+          <p style="margin:0 0 10px 0; font-size:0.88rem; color:var(--text-sub);">現在ストックされているスキャン候補はありません。</p>
           <button type="button" class="btn btn-primary btn-sm" id="btnEmptyJumpManual">🔍 手動キーワード検索を開く</button>
         </div>
       `;
@@ -446,47 +520,75 @@
       return;
     }
 
+    banner.className = "alert alert-success";
+    banner.innerHTML = `
+      <strong>📚 スキャン検出候補を ${state.mobileScannedBatches.length} 件保持中（カメラを動かしても消えません）</strong><br/>
+      続けて次の本の奥付をスキャンして溜めるか、下の候補カードから対象の図書（登録番号）を選んでください。
+    `;
+
     const destConfig = getActiveDestinationConfig();
     const destLabel = destConfig.mode === "WAREHOUSE"
       ? `📦 ${destConfig.location}`
       : `🏢 ${destConfig.location || "(移動先未入力)"}`;
 
-    container.innerHTML = state.mobileCandidates
-      .map((cand) => {
-        const b = cand.book;
-        const alreadySelected = state.mobileSelectedList.some((s) => s.book_id === b.book_id);
-        const reasonsHtml = (cand.reasons || [])
-          .map((r) => `<span class="reason-pill">${escapeHtml(r)}</span>`)
+    container.innerHTML = state.mobileScannedBatches
+      .map((batch, bIdx) => {
+        const cardsHtml = batch.candidates
+          .map((cand) => {
+            const b = cand.book;
+            const alreadySelected = state.mobileSelectedList.some((s) => s.book_id === b.book_id);
+            const reasonsHtml = (cand.reasons || [])
+              .map((r) => `<span class="reason-pill">${escapeHtml(r)}</span>`)
+              .join("");
+
+            return `
+              <div class="candidate-card ${alreadySelected ? "is-already-selected" : cand.score >= 100 ? "high-match" : ""}">
+                <div class="candidate-id-row">
+                  <span class="book-id-tag">登録番号: ${escapeHtml(b.book_id)}</span>
+                  <span style="font-size:0.8rem; font-weight:700; color:${alreadySelected ? "var(--success)" : "var(--primary)"};">
+                    ${alreadySelected ? "✅ 選択確定済み" : `照合スコア: ${cand.score}`}
+                  </span>
+                </div>
+                <h3 class="candidate-title">${escapeHtml(b.title)}</h3>
+                <div class="match-reasons">${reasonsHtml}</div>
+                <div class="candidate-meta-grid">
+                  <div><strong>版・巻号:</strong> ${escapeHtml(b.edition || "未登録")} (${escapeHtml(b.pub_year || "-")}年)</div>
+                  <div><strong>所管部署:</strong> ${escapeHtml(b.department || "未登録")}</div>
+                  <div><strong>ISBN:</strong> ${escapeHtml(b.isbn || "なし")}</div>
+                  <div><strong>著者/出版:</strong> ${escapeHtml(b.author || "-")} / ${escapeHtml(b.publisher || "-")}</div>
+                  <div style="grid-column: span 2;"><strong>現在場所:</strong> ${escapeHtml(b.location || "未登録")} ${b.box_number ? `(箱:${escapeHtml(b.box_number)})` : ""}</div>
+                  ${b.notes ? `<div style="grid-column: span 2; color:var(--warning);"><strong>備考:</strong> ${escapeHtml(b.notes)}</div>` : ""}
+                </div>
+                <button
+                  type="button"
+                  class="btn ${alreadySelected ? "btn-outline" : "btn-primary"} btn-block btn-select-candidate"
+                  data-book-id="${escapeHtml(b.book_id)}"
+                  ${alreadySelected ? "disabled" : ""}
+                >
+                  ${alreadySelected
+                    ? `✅ 選択済みです（登録番号: ${escapeHtml(b.book_id)}）`
+                    : `👆 この図書（${escapeHtml(b.book_id)}）を選択し「${escapeHtml(destLabel)}」へ登録`}
+                </button>
+              </div>
+            `;
+          })
           .join("");
 
         return `
-          <div class="candidate-card ${alreadySelected ? "is-already-selected" : cand.score >= 100 ? "high-match" : ""}">
-            <div class="candidate-id-row">
-              <span class="book-id-tag">登録番号: ${escapeHtml(b.book_id)}</span>
-              <span style="font-size:0.8rem; font-weight:700; color:${alreadySelected ? "var(--danger)" : "var(--primary)"};">
-                ${alreadySelected ? "✅ 選択済み（二重追加防止）" : `照合スコア: ${cand.score}`}
-              </span>
+          <div style="border:2px solid #cbd5e1; border-radius:10px; padding:10px; margin-bottom:14px; background:#f8fafc;">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid #cbd5e1;">
+              <div style="font-size:0.82rem; font-weight:700; color:#1e3a8a;">
+                📌 読取 #${state.mobileScannedBatches.length - bIdx} ${escapeHtml(batch.sourceLabel)}
+                <span style="color:var(--text-muted); font-weight:400;">(${escapeHtml(batch.detectedAt)})</span>
+              </div>
+              <button type="button" class="btn btn-outline btn-sm btn-remove-batch" data-batch-idx="${bIdx}" style="min-height:28px; padding:2px 8px; font-size:0.75rem;">
+                ✕ この読取を消す
+              </button>
             </div>
-            <h3 class="candidate-title">${escapeHtml(b.title)}</h3>
-            <div class="match-reasons">${reasonsHtml}</div>
-            <div class="candidate-meta-grid">
-              <div><strong>版・巻号:</strong> ${escapeHtml(b.edition || "未登録")} (${escapeHtml(b.pub_year || "-")}年)</div>
-              <div><strong>所管部署:</strong> ${escapeHtml(b.department || "未登録")}</div>
-              <div><strong>ISBN:</strong> ${escapeHtml(b.isbn || "なし")}</div>
-              <div><strong>著者/出版:</strong> ${escapeHtml(b.author || "-")} / ${escapeHtml(b.publisher || "-")}</div>
-              <div style="grid-column: span 2;"><strong>現在場所:</strong> ${escapeHtml(b.location || "未登録")} ${b.box_number ? `(箱:${escapeHtml(b.box_number)})` : ""}</div>
-              ${b.notes ? `<div style="grid-column: span 2; color:var(--warning);"><strong>備考:</strong> ${escapeHtml(b.notes)}</div>` : ""}
+            <div style="font-size:0.78rem; color:#92400e; margin-bottom:8px; font-weight:600;">
+              ${escapeHtml(batch.statusLabel)}
             </div>
-            <button
-              type="button"
-              class="btn ${alreadySelected ? "btn-outline" : "btn-primary"} btn-block btn-select-candidate"
-              data-book-id="${escapeHtml(b.book_id)}"
-              ${alreadySelected ? "disabled" : ""}
-            >
-              ${alreadySelected
-                ? `選択済みです（登録番号: ${escapeHtml(b.book_id)}）`
-                : `👆 この図書（${escapeHtml(b.book_id)}）を選択し「${escapeHtml(destLabel)}」へ登録`}
-            </button>
+            ${cardsHtml}
           </div>
         `;
       })
@@ -496,6 +598,15 @@
       btn.addEventListener("click", () => {
         const bookId = btn.getAttribute("data-book-id");
         handleSelectCandidateBook(bookId);
+      });
+    });
+
+    container.querySelectorAll(".btn-remove-batch").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.getAttribute("data-batch-idx"), 10);
+        state.mobileScannedBatches.splice(idx, 1);
+        saveMobileSessionToStorage();
+        renderCandidatesList();
       });
     });
   }
@@ -533,10 +644,14 @@
   // 選択済み一覧の描画と取消
   function renderMobileSelectedList() {
     const countSpan = document.getElementById("mobileSelectedCount");
+    const bulkCountSpan = document.getElementById("mobileBulkUpdateCount");
     const container = document.getElementById("mobileSelectedListContainer");
     if (!countSpan || !container) return;
 
     countSpan.textContent = String(state.mobileSelectedList.length);
+    if (bulkCountSpan) {
+      bulkCountSpan.textContent = String(state.mobileSelectedList.length);
+    }
 
     if (state.mobileSelectedList.length === 0) {
       container.innerHTML = `
@@ -741,9 +856,14 @@
           if (barcodes && barcodes.length > 0) {
             const codeVal = barcodes[0].rawValue;
             if (codeVal && codeVal !== state.lastFrameSignature) {
-              state.lastFrameSignature = codeVal;
-              statusPill.textContent = `ISBNバーコード検出: ${codeVal}`;
-              executeOcrTextMatch(`ISBN ${codeVal}`, "【カメラ連続読取（バーコード検出）】");
+              const res = executeOcrTextMatch(`ISBN ${codeVal}`, "【カメラ連続読取（バーコード検出）】", {
+                isContinuousCamera: !forceRun
+              });
+              if (res.matched) {
+                state.lastFrameSignature = codeVal;
+                statusPill.textContent = `✅ ISBN検出・保持完了 (${codeVal}) ― 次の本も続けてスキャン可能`;
+                showToast(`ISBN (${codeVal}) を検出し候補ストックへ保持しました！`, "success");
+              }
               state.isOcrBusy = false;
               return;
             }
@@ -759,14 +879,21 @@
 
       if (recognizedText.length >= 4) {
         const normSig = Core.normalizeText(recognizedText).slice(0, 40);
-        // 全く同じフレーム文字列の連続再描画を抑止しつつ、強制実行時は即時反映
+        // 連続カメラ時は「有効な候補がヒットしたときのみ」ストックに追加し、候補0件なら既存ストックを絶対に消さない
         if (forceRun || normSig !== state.lastFrameSignature) {
-          state.lastFrameSignature = normSig;
-          executeOcrTextMatch(recognizedText, "【実機カメラ ブラウザ内OCR結果】");
+          const res = executeOcrTextMatch(recognizedText, "【実機カメラ ブラウザ内OCR】", {
+            isContinuousCamera: !forceRun
+          });
+          if (res.matched) {
+            state.lastFrameSignature = normSig;
+            statusPill.textContent = `✅ 奥付候補を検出・保持中（ストック計 ${state.mobileScannedBatches.length} 件）`;
+            showToast(`奥付から候補（${res.count}件）を検出しストックに保持しました！`, "success");
+          } else {
+            statusPill.textContent = `連続読取中（ストック ${state.mobileScannedBatches.length} 件保持中 / 次の奥付を探しています...）`;
+          }
         }
-        statusPill.textContent = "連続読取中（最終認識: " + new Date().toLocaleTimeString() + "）";
       } else {
-        statusPill.textContent = "連続読取中（文字を待機中...奥付に近づけてください）";
+        statusPill.textContent = `連続読取中（ストック ${state.mobileScannedBatches.length} 件保持中 / 奥付を枠内に合わせてください）`;
       }
     } catch (err) {
       statusPill.textContent = "ブラウザ内OCR待機中（オフライン時は下のテキスト認識入力をご利用ください）";
@@ -1312,12 +1439,54 @@
 
     document.getElementById("btnMobileClearStorage").addEventListener("click", () => {
       state.mobileSelectedList = [];
+      state.mobileScannedBatches = [];
       localStorage.removeItem(STORAGE_KEYS.MOBILE_SESSION);
       renderMobileSelectedList();
       renderCandidatesList();
       document.getElementById("mobileQrArea").classList.add("hidden");
-      showToast("iPhone側の選択済み作業データを消去しました。");
+      showToast("iPhone側の選択済み作業データとスキャン候補ストックを消去しました。");
     });
+
+    const btnClearBatches = document.getElementById("btnClearScannedBatches");
+    if (btnClearBatches) {
+      btnClearBatches.addEventListener("click", () => {
+        state.mobileScannedBatches = [];
+        state.lastFrameSignature = "";
+        saveMobileSessionToStorage();
+        renderCandidatesList();
+        showToast("スキャン検出候補ストックをクリアしました。");
+      });
+    }
+
+    const btnBulkUpdateDest = document.getElementById("btnBulkUpdateSelectedDest");
+    if (btnBulkUpdateDest) {
+      btnBulkUpdateDest.addEventListener("click", () => {
+        if (state.mobileSelectedList.length === 0) {
+          showToast("先に上の候補ストックから対象の図書を選択してください。", "error");
+          return;
+        }
+        const destConfig = getActiveDestinationConfig();
+        if (!destConfig.isValid) {
+          showToast(destConfig.error || "移動先の設定を確認してください。", "error");
+          return;
+        }
+        state.mobileSelectedList = state.mobileSelectedList.map((item) => ({
+          ...item,
+          new_location: destConfig.location,
+          new_box_number: destConfig.mode === "WAREHOUSE" ? destConfig.boxNumber : "",
+          change_mode: destConfig.mode === "WAREHOUSE" ? "外部倉庫（日高）箱詰・発送" : "本部内保管場所変更",
+          worker_note: destConfig.workerNote || item.worker_note,
+          selected_at: new Date().toISOString()
+        }));
+        saveMobileSessionToStorage();
+        renderMobileSelectedList();
+        updateMobileBoxValidationUi();
+        showToast(
+          `選択済みの全 ${state.mobileSelectedList.length} 冊の移動先を「${destConfig.location}」へ一括確定・更新しました！`,
+          "success"
+        );
+      });
+    }
 
     // 3. iPhone側：移動先モード・定型書架・箱番号設定
     document.getElementById("btnDestModeHq").addEventListener("click", () => setMobileDestinationMode("HQ"));
