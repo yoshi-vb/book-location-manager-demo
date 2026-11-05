@@ -243,25 +243,42 @@
         </div>
       </div>
 
-      <!-- ステップ3: 照合結果・候補一覧（人が現物と図書登録番号を確認して選択） -->
+      <!-- ステップ3: 照合結果・連続スキャン候補ストック（消えずに蓄積され、後から選択・場所確定可能） -->
       <div class="card">
         <div class="card-header">
-          <h2 class="card-title">✅ 4. 照合候補の確認と選択（自動確定しません）</h2>
-          <button type="button" id="btnSwitchToManualFromResult" class="btn btn-outline btn-sm">🔍 手動検索へ切替</button>
+          <h2 class="card-title">✅ 4. スキャン検出候補ストック（<span id="scannedBatchCount">0</span>件の読取）</h2>
+          <div style="display:flex; gap:6px;">
+            <button type="button" id="btnClearScannedBatches" class="btn btn-outline btn-sm">🗑️ 読取候補クリア</button>
+            <button type="button" id="btnSwitchToManualFromResult" class="btn btn-outline btn-sm">🔍 手動検索へ</button>
+          </div>
         </div>
 
         <div id="matchStatusBanner" class="alert alert-info">
-          上の「実機カメラ読取」「模擬OCR検証」「手動検索」のいずれかを実行すると、ここに候補が表示されます。
+          カメラで複数の奥付を連続スキャンすると、読み取れた候補が消えずにここへ次々とストック（蓄積）されます。<br/>
+          複数冊をスキャンし終えたあとで、各候補の「選択」ボタンを押すか、下の「選択確定済み一覧」でまとめて保管場所を確定・変更できます。
         </div>
 
         <div id="candidatesContainer"></div>
       </div>
 
-      <!-- ステップ4: 選択済み一覧・中断再開・変更用CSV/QR出力 -->
+      <!-- ステップ4: 選択済み一覧・後から保管場所を一括確定/変更・中断再開・CSV/QR出力 -->
       <div class="card" style="border-top: 4px solid var(--success);">
         <div class="card-header">
           <h2 class="card-title">📋 5. 選択確定済み一覧（<span id="mobileSelectedCount">0</span>冊）</h2>
           <span style="font-size:0.78rem; color:var(--success); font-weight:700;">💾 端末内に自動保存中（中断・再開対応）</span>
+        </div>
+
+        <!-- 連続スキャン・選択した後にまとめて保管場所を確定・一括変更するパネル -->
+        <div style="background:var(--bg-subtle); border:1px solid var(--border-color); border-radius:8px; padding:10px; margin-bottom:12px;">
+          <div style="font-size:0.83rem; font-weight:700; margin-bottom:6px; color:var(--text-main);">
+            📌 複数冊をスキャン・選択した後に、まとめて移動先の保管場所を確定・上書き反映:
+          </div>
+          <p style="margin:0 0 8px 0; font-size:0.78rem; color:var(--text-sub);">
+            先に奥付を連続スキャンして図書を選んだあとでも、上の「📍 2. 移動先の保管場所」を変えて下のボタンを押せば、選択済みの全冊の移動先をまとめて確定・更新できます。
+          </p>
+          <button type="button" id="btnBulkUpdateSelectedDest" class="btn btn-primary btn-sm btn-block">
+            🔄 選択済みの全図書（<span id="mobileBulkUpdateCount">0</span>冊）を現在指定中の移動先へ一括更新する
+          </button>
         </div>
 
         <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
