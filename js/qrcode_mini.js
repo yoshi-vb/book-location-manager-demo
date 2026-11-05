@@ -55,7 +55,7 @@
     return rem;
   }
 
-  // Version 1〜14 (Error Correction Level L: 01) のブロック定義
+  // Version 1〜20 (Error Correction Level L: 01) のブロック定義（最大約858バイト対応）
   // [totalDataCodewords, ecCodewordsPerBlock, numBlocksGroup1, dataCodewordsGroup1, numBlocksGroup2, dataCodewordsGroup2]
   const VERSION_TABLE_L = [
     null,
@@ -72,7 +72,13 @@
     [324, 20, 4, 81, 0, 0],   // V11
     [370, 24, 2, 92, 2, 93],  // V12
     [428, 26, 4, 107, 0, 0],  // V13
-    [461, 30, 3, 115, 1, 116] // V14
+    [461, 30, 3, 115, 1, 116],// V14
+    [523, 22, 5, 87, 1, 88],  // V15
+    [589, 24, 5, 98, 1, 99],  // V16
+    [647, 28, 1, 107, 5, 108],// V17
+    [721, 30, 5, 120, 1, 121],// V18
+    [795, 28, 3, 113, 4, 114],// V19
+    [861, 28, 3, 107, 5, 108] // V20
   ];
 
   const ALIGNMENT_PATTERNS = [
@@ -90,7 +96,13 @@
     [6, 30, 54],
     [6, 32, 58],
     [6, 34, 62],
-    [6, 26, 46, 66]
+    [6, 26, 46, 66],
+    [6, 26, 48, 70],
+    [6, 26, 50, 74],
+    [6, 30, 54, 78],
+    [6, 30, 56, 82],
+    [6, 30, 58, 86],
+    [6, 34, 62, 90]
   ];
 
   function utf8Bytes(str) {
