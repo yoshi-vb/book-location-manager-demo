@@ -947,62 +947,137 @@
 
   /**
    * iPhone ⇄ PC 間のQRコード受け渡し用コンパクトペイロード生成・復元
-   * 1つのQRコードに収まるよう、変更データを軽量JSON配列化し、件数が多い場合は複数QRに自動分割する
+   * - 改善①: 書名（日本語の長い文字列）はPC側の蔵書台帳から図書登録番号で自動復元できるため除外し、
+   *   さらに同じ移動先・箱番号・メモの図書をグループ化して登録番号配列のみを格納する超軽量形式 (v:2) にする。
+   * - 改善②: 冊数固定ではなく、UTF-8バイト長（上限350バイト目安）を計算して1枚のQRに最大30〜40冊収め、
+   *   超えた場合のみ自動で2枚目以降のQRコードへ分割する。
    */
-  function encodeChangesToQrChunks(selectionList, maxItemsPerQr = 8) {
-    if (!selectionList || selectionList.length === 0) return [];
-    const chunks = [];
-    const totalChunks = Math.ceil(selectionList.length / maxItemsPerQr);
-    const batchId = Date.now().toString(36).slice(-5).toUpperCase();
+  function getUtf8ByteLength(str) {
+    if (typeof TextEncoder !== "undefined") {
+      return new TextEncoder().encode(String(str)).length;
+    }
+    return unescape(encodeURIComponent(String(str))).length;
+  }
 
-    for (let i = 0; i < totalChunks; i++) {
-      const slice = selectionList.slice(i * maxItemsPerQr, (i + 1) * maxItemsPerQr);
-      const compactItems = slice.map((item) => ({
-        i: item.book_id,
-        l: item.new_location,
-        b: item.new_box_number || "",
-        n: item.worker_note || "",
-        t: item.title ? String(item.title).slice(0, 18) : ""
-      }));
-      const payloadObj = {
-        v: 1,
+  function buildCompactGroups(items) {
+    const groupMap = new Map();
+    for (const item of items) {
+      const loc = String(item.new_location || "").trim();
+      const box = String(item.new_box_number || "").trim();
+      const note = String(item.worker_note || "").trim();
+      const key = `${loc}\t${box}\t${note}`;
+      if (!groupMap.has(key)) {
+        const g = { l: loc, ids: [] };
+        if (box) g.b = box;
+        if (note) g.n = note;
+        groupMap.set(key, g);
+      }
+      groupMap.get(key).ids.push(String(item.book_id || "").trim());
+    }
+    return Array.from(groupMap.values());
+  }
+
+  function encodeChangesToQrChunks(selectionList, maxBytesPerQr = 360) {
+    if (!selectionList || selectionList.length === 0) return [];
+    const batchId = Date.now().toString(36).slice(-5).toUpperCase();
+    const rawSlices = [];
+    let currentSlice = [];
+
+    for (const item of selectionList) {
+      const candidateSlice = [...currentSlice, item];
+      const testPayload = {
+        v: 2,
         tp: "BLM_CHG",
         id: batchId,
-        p: i + 1,
-        tc: totalChunks,
-        d: compactItems
+        p: 1,
+        tc: 1,
+        g: buildCompactGroups(candidateSlice)
       };
-      chunks.push({
-        page: i + 1,
+      const byteLen = getUtf8ByteLength(JSON.stringify(testPayload));
+      if (currentSlice.length > 0 && byteLen > maxBytesPerQr) {
+        rawSlices.push(currentSlice);
+        currentSlice = [item];
+      } else {
+        currentSlice = candidateSlice;
+      }
+    }
+    if (currentSlice.length > 0) {
+      rawSlices.push(currentSlice);
+    }
+
+    const totalChunks = rawSlices.length;
+    return rawSlices.map((slice, idx) => {
+      const payloadObj = {
+        v: 2,
+        tp: "BLM_CHG",
+        id: batchId,
+        p: idx + 1,
+        tc: totalChunks,
+        g: buildCompactGroups(slice)
+      };
+      return {
+        page: idx + 1,
         totalPages: totalChunks,
         itemCount: slice.length,
         jsonText: JSON.stringify(payloadObj)
-      });
-    }
-    return chunks;
+      };
+    });
   }
 
   function decodeQrChunkText(rawQrText) {
     try {
       const obj = JSON.parse(String(rawQrText || "").trim());
-      if (!obj || obj.tp !== "BLM_CHG" || !Array.isArray(obj.d)) {
+      if (!obj || obj.tp !== "BLM_CHG") {
         return { isValid: false, error: "このアプリの保管場所変更QRコードではありません。" };
       }
-      const records = obj.d.map((entry) => ({
-        book_id: String(entry.i || "").trim(),
-        new_location: String(entry.l || "").trim(),
-        new_box_number: String(entry.b || "").trim(),
-        worker_note: String(entry.n || "").trim(),
-        title: String(entry.t || "").trim(),
-        selected_at: new Date().toISOString()
-      }));
-      return {
-        isValid: true,
-        batchId: obj.id,
-        page: obj.p || 1,
-        totalPages: obj.tc || 1,
-        records
-      };
+
+      // v2: 移動先グループ化による超軽量フォーマット
+      if (Array.isArray(obj.g)) {
+        const records = [];
+        for (const grp of obj.g) {
+          const loc = String(grp.l || "").trim();
+          const box = String(grp.b || "").trim();
+          const note = String(grp.n || "").trim();
+          const ids = Array.isArray(grp.ids) ? grp.ids : [];
+          for (const id of ids) {
+            records.push({
+              book_id: String(id || "").trim(),
+              new_location: loc,
+              new_box_number: box,
+              worker_note: note,
+              selected_at: new Date().toISOString()
+            });
+          }
+        }
+        return {
+          isValid: true,
+          batchId: obj.id,
+          page: obj.p || 1,
+          totalPages: obj.tc || 1,
+          records
+        };
+      }
+
+      // v1: 旧フォーマット互換
+      if (Array.isArray(obj.d)) {
+        const records = obj.d.map((entry) => ({
+          book_id: String(entry.i || "").trim(),
+          new_location: String(entry.l || "").trim(),
+          new_box_number: String(entry.b || "").trim(),
+          worker_note: String(entry.n || "").trim(),
+          title: String(entry.t || "").trim(),
+          selected_at: new Date().toISOString()
+        }));
+        return {
+          isValid: true,
+          batchId: obj.id,
+          page: obj.p || 1,
+          totalPages: obj.tc || 1,
+          records
+        };
+      }
+
+      return { isValid: false, error: "QRコードデータの形式が不明です。" };
     } catch (e) {
       return { isValid: false, error: "QRコードデータの解析に失敗しました（JSON形式不正）。" };
     }
