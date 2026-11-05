@@ -147,7 +147,13 @@
       <div class="card">
         <div class="card-header">
           <h2 class="card-title">📷 3. 奥付の読取・図書検索</h2>
+          <label style="font-size:0.8rem; display:inline-flex; align-items:center; gap:4px; cursor:pointer; font-weight:600;">
+            <input type="checkbox" id="chkSoundFeedback" checked />
+            🔊 判定音・振動ON
+          </label>
         </div>
+        <!-- iOS 18+ ハプティック触覚フィードバック発火用の隠しスイッチ -->
+        <input type="checkbox" id="iosHapticSwitch" switch class="hidden" />
 
         <!-- 読取モード切替ボタン -->
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-bottom:12px;">
