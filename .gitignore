@@ -1,0 +1,37 @@
+# 本番データ（絶対公開禁止・Git管理外）
+production_data/
+*production*.csv
+*production*.json
+*real*.csv
+*real*.json
+*honban*.csv
+*honban*.json
+
+# 作業履歴・バックアップ・出力ファイル
+history/
+backups/
+exports/
+output/
+*.bak
+
+# 奥付画像・カメラキャプチャ・OCR一時データ
+images/
+captures/
+ocr_results/
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# 環境変数・認証情報
+.env
+.env.*
+*.key
+*.pem
+secrets.*
+
+# Python キャッシュ・OS固有ファイル
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
