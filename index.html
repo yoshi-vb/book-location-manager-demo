@@ -249,61 +249,44 @@
         </div>
       </div>
 
-      <!-- ステップ3: 照合結果・連続スキャン候補ストック（消えずに蓄積され、後から選択・場所確定可能） -->
-      <div class="card">
-        <div class="card-header">
-          <h2 class="card-title">✅ 4. スキャン検出候補ストック（<span id="scannedBatchCount">0</span>件の読取）</h2>
-          <div style="display:flex; gap:6px;">
-            <button type="button" id="btnClearScannedBatches" class="btn btn-outline btn-sm">🗑️ 読取候補クリア</button>
-            <button type="button" id="btnSwitchToManualFromResult" class="btn btn-outline btn-sm">🔍 手動検索へ</button>
-          </div>
-        </div>
-
-        <div id="matchStatusBanner" class="alert alert-info">
-          カメラで複数の奥付を連続スキャンすると、読み取れた候補が消えずにここへ次々とストック（蓄積）されます。<br/>
-          複数冊をスキャンし終えたあとで、各候補の「選択」ボタンを押すか、下の「選択確定済み一覧」でまとめて保管場所を確定・変更できます。
-        </div>
-
-        <div id="candidatesContainer"></div>
-      </div>
-
-      <!-- ステップ4: 選択済み一覧・後から保管場所を一括確定/変更・中断再開・CSV/QR出力 -->
+      <!-- ステップ4: スキャン完了（確定済み）図書一覧・一括場所変更・CSV/QR出力 -->
       <div class="card" style="border-top: 4px solid var(--success);">
         <div class="card-header">
-          <h2 class="card-title">📋 5. 選択確定済み一覧（<span id="mobileSelectedCount">0</span>冊）</h2>
-          <span style="font-size:0.78rem; color:var(--success); font-weight:700;">💾 端末内に自動保存中（中断・再開対応）</span>
+          <h2 class="card-title">✅ 4. スキャン完了した図書一覧（<span id="mobileSelectedCount">0</span>冊）</h2>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <span style="font-size:0.75rem; color:var(--success); font-weight:700;">💾 自動保存中</span>
+            <button type="button" id="btnSwitchToManualFromResult" class="btn btn-outline btn-sm">🔍 手動検索</button>
+          </div>
         </div>
 
-        <!-- 連続スキャン・選択した後にまとめて保管場所を確定・一括変更するパネル -->
-        <div style="background:var(--bg-subtle); border:1px solid var(--border-color); border-radius:8px; padding:10px; margin-bottom:12px;">
-          <div style="font-size:0.83rem; font-weight:700; margin-bottom:6px; color:var(--text-main);">
-            📌 複数冊をスキャン・選択した後に、まとめて移動先の保管場所を確定・上書き反映:
-          </div>
-          <p style="margin:0 0 8px 0; font-size:0.78rem; color:var(--text-sub);">
-            先に奥付を連続スキャンして図書を選んだあとでも、上の「📍 2. 移動先の保管場所」を変えて下のボタンを押せば、選択済みの全冊の移動先をまとめて確定・更新できます。
-          </p>
-          <button type="button" id="btnBulkUpdateSelectedDest" class="btn btn-primary btn-sm btn-block">
-            🔄 選択済みの全図書（<span id="mobileBulkUpdateCount">0</span>冊）を現在指定中の移動先へ一括更新する
+        <div id="matchStatusBanner" class="alert alert-info" style="padding:8px 10px; font-size:0.82rem; margin-bottom:10px;">
+          奥付をスキャンすると、1冊該当なら即座にここへ追加され、複数該当ならポップアップ画面で特定できます。
+        </div>
+
+        <!-- スキャン完了した図書のスリム一覧（本が特定できる最小情報のみ表示） -->
+        <div id="mobileSelectedListContainer" style="border:1px solid var(--border-color); border-radius:8px; overflow:hidden; margin-bottom:12px;"></div>
+
+        <!-- 後からまとめて保管場所を上書き反映するボタン -->
+        <div style="margin-bottom:10px;">
+          <button type="button" id="btnBulkUpdateSelectedDest" class="btn btn-outline btn-sm btn-block">
+            🔄 一覧の全図書（<span id="mobileBulkUpdateCount">0</span>冊）を現在指定中の移動先へ一括更新
           </button>
         </div>
 
-        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
           <button type="button" id="btnExportMobileCsv" class="btn btn-success" style="flex:1;">
-            📤 変更用CSVを出力
+            📤 変更用CSV出力
           </button>
           <button type="button" id="btnShowMobileQr" class="btn btn-primary" style="flex:1;">
-            🔳 PC受け渡し用QRコード表示
+            🔳 PC受け渡し用QR表示
           </button>
         </div>
 
         <!-- QRコード表示エリア（トグル表示） -->
-        <div id="mobileQrArea" class="qr-display-box hidden" style="margin-bottom:12px;">
+        <div id="mobileQrArea" class="qr-display-box hidden" style="margin-bottom:4px;">
           <div style="font-weight:700; font-size:0.9rem; margin-bottom:4px;">
             📲 PCへ変更データを受け渡すQRコード
           </div>
-          <p style="font-size:0.78rem; color:var(--text-sub); margin:0 0 6px 0;">
-            PC側の「変更データ取込・比較」タブでカメラ読取またはQRテキスト貼付ができます（外部通信は一切行いません）。
-          </p>
           <canvas id="mobileQrCanvas"></canvas>
           <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
             <button type="button" id="btnPrevQrPage" class="btn btn-outline btn-sm">◀ 前へ</button>
@@ -311,12 +294,27 @@
             <button type="button" id="btnNextQrPage" class="btn btn-outline btn-sm">次へ ▶</button>
           </div>
           <div style="width:100%; margin-top:8px; text-align:left;">
-            <label class="form-label" style="font-size:0.75rem;">QRペイロード文字列（コピーしてTeams/メール等で送ることも可能）</label>
-            <textarea id="mobileQrPayloadText" class="textarea" rows="2" readonly style="font-size:0.75rem; min-height:50px;"></textarea>
+            <textarea id="mobileQrPayloadText" class="textarea" rows="2" readonly style="font-size:0.75rem; min-height:44px;"></textarea>
           </div>
         </div>
+      </div>
 
-        <div id="mobileSelectedListContainer"></div>
+      <!-- 複数ヒット時のその場選択ポップアップ（スクロール不要モーダル） -->
+      <div id="multiHitModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="multiHitModalTitle">
+        <div class="modal-content">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid #e2e8f0;">
+            <h3 id="multiHitModalTitle" style="margin:0; font-size:0.98rem; color:#92400e;">
+              ⚠️ 複数ヒット：どの図書か特定してください
+            </h3>
+            <button type="button" id="btnCancelMultiModal" class="btn btn-outline btn-sm" style="min-height:32px; padding:2px 10px;">
+              ✕ キャンセル
+            </button>
+          </div>
+          <p id="multiHitModalSub" style="margin:0 0 10px 0; font-size:0.8rem; color:var(--text-sub);">
+            該当する1冊をタップすると確定され、次の奥付スキャンへ進みます。
+          </p>
+          <div id="candidatesContainer"></div>
+        </div>
       </div>
 
     </section>
