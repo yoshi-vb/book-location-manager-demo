@@ -889,7 +889,7 @@
       return;
     }
 
-    state.mobileQrChunks = Core.encodeChangesToQrChunks(state.mobileSelectedList, 6);
+    state.mobileQrChunks = Core.encodeChangesToQrChunks(state.mobileSelectedList);
     if (state.mobileQrPageIndex >= state.mobileQrChunks.length) {
       state.mobileQrPageIndex = 0;
     }
