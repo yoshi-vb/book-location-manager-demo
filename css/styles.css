@@ -403,6 +403,45 @@ body {
 .flash-warning { animation: scanFlashWarning 0.9s ease-out; }
 .flash-error   { animation: scanFlashError 0.9s ease-out; }
 
+/* 複数ヒット時のその場選択ポップアップ（スクロール不要モーダル） */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(15, 23, 42, 0.75);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.modal-content {
+  background-color: #ffffff;
+  width: 100%;
+  max-width: 500px;
+  max-height: 86vh;
+  border-radius: 12px;
+  padding: 14px;
+  overflow-y: auto;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+  border-top: 5px solid #f59e0b;
+}
+
+/* スキャン完了図書のスリム行表示 */
+.compact-book-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 0.82rem;
+  background: #ffffff;
+}
+.compact-book-row:last-child {
+  border-bottom: none;
+}
+
 /* 候補カード（iPhone用：図書登録番号・版・部署を大きく比較表示） */
 .candidate-card {
   border: 2px solid var(--border-color);
