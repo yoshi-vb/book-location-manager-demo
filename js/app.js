@@ -451,74 +451,50 @@
   }
 
   /**
-   * 対策①：読み取った文字列に「奥付らしさ（奥付サイン）」が含まれているかを判定する
-   * 机の木目・背景・服のシワ・本の移動中の無関係な文字列では「該当なし警告」を一切鳴らさず静かにスルーし、
-   * ちゃんと奥付を写しているのに未登録だった時だけ警告を鳴らすためのフィルタ。
+   * カメラフレームを軽量サイズ（横幅最大600px）のグレースケール＆コントラスト強調画像へ変換する。
+   * 1280x720 のまま OCR に渡すのに比べて画素数が約4分の1になり、「解析中…」の時間が劇的に短縮される。
    */
-  const COLOPHON_SIGN_REGEX =
-    /ISBN|97[89][-\s0-9]{4,}|4-[0-9]{2,6}-[0-9]{2,6}|発行|印刷|製本|初版|第\s*[0-9０-９一二三四五六七八九十]+\s*[刷版]|著者|編者|監修|発行所|発行者|発売|出版|株式会社|書店|社|[12][09][0-9]{2}\s*年|Printed|©|〒\s*[0-9]{3}/i;
+  function prepareFastOcrCanvas(video, targetCanvas) {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const scale = Math.min(1, 600 / vw);
+    const w = Math.max(1, Math.round(vw * scale));
+    const h = Math.max(1, Math.round(vh * scale));
+    targetCanvas.width = w;
+    targetCanvas.height = h;
+    const ctx = targetCanvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, w, h);
 
-  function hasColophonSignature(rawText, features) {
-    if (!rawText) return false;
-    if (features && (features.exactIsbns.length > 0 || features.fuzzyIsbnPrefixes.length > 0)) {
-      return true;
-    }
-    return COLOPHON_SIGN_REGEX.test(String(rawText).normalize("NFKC"));
-  }
-
-  /**
-   * 対策②：カメラ映像のモーション（手や本の動き）検知
-   * 16x12 の縮小輝度サンプルを前回フレームと比較し、本を入れ替えている最中（映像が動いている間）は true を返す。
-   */
-  function isCameraFrameMoving(canvas) {
     try {
-      const w = 16;
-      const h = 12;
-      const off = document.createElement("canvas");
-      off.width = w;
-      off.height = h;
-      const octx = off.getContext("2d");
-      octx.drawImage(canvas, 0, 0, w, h);
-      const data = octx.getImageData(0, 0, w, h).data;
-      const current = new Uint8Array(w * h);
-      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-        current[p] = (data[i] * 77 + data[i + 1] * 150 + data[i + 2] * 29) >> 8;
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const lum = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+        // 緩やかなコントラスト強調（文字をくっきりさせる）
+        const c = lum < 110 ? Math.max(0, (lum - 110) * 1.35 + 110) : Math.min(255, (lum - 110) * 1.15 + 110);
+        d[i] = d[i + 1] = d[i + 2] = c;
       }
-      if (!state.prevMotionSample) {
-        state.prevMotionSample = current;
-        return false;
-      }
-      let diffSum = 0;
-      for (let p = 0; p < current.length; p++) {
-        diffSum += Math.abs(current[p] - state.prevMotionSample[p]);
-      }
-      state.prevMotionSample = current;
-      const avgDiff = diffSum / current.length;
-      // 平均輝度差が 18 以上の場合は「本やカメラが動いている最中」と判定してお休みする
-      return avgDiff >= 18;
-    } catch (_) {
-      return false;
-    }
+      ctx.putImageData(imgData, 0, 0);
+    } catch (_) {}
   }
 
   /**
-   * スキャン・OCR照合の即時判定処理:
-   * 1. 該当する図書が「1冊のみ」の場合 ➔ その瞬間に候補として自動確定（＋3.5秒クールタイム開始）
+   * スキャン・OCR照合の即時判定処理（待ち時間ゼロ・高速連続スキャン版）:
+   * 1. 該当する図書が「1冊のみ」の場合 ➔ 待ち時間ゼロで即座に自動確定（既に確定済みの本が映り続けている間は静かにスルー）
    * 2. 「複数ヒット」した場合 ➔ ポップアップで特定するまで次のスキャンを一時停止（ロック）
-   * 3. 「該当なし」の場合 ➔ 連続カメラ時は「ちゃんと奥付サインがあるのに未登録だった時だけ」警告音を鳴らす
+   * 3. 「該当なし」の場合 ➔ 連続カメラ時は「チェックディジットが正しい未登録ISBNが明確に読めた時」のみ警告音を鳴らす
    */
   function executeOcrTextMatch(rawText, sourceLabel = "【OCR読取結果】", options = {}) {
     const isContinuousCamera = Boolean(options.isContinuousCamera);
     const silentInit = Boolean(options.silentInit);
     const matchResult = Core.matchBooksFromOcr(rawText, state.catalogBooks);
     const features = matchResult.extractedFeatures || { exactIsbns: [], fuzzyIsbnPrefixes: [], lines: [] };
-    const isColophon = hasColophonSignature(rawText, features);
 
     // A. 蔵書リストに該当するものがない場合
     if (matchResult.candidates.length === 0) {
-      // 連続カメラの自動スキャン中に「奥付サイン（ISBN・発行・著者・出版社等）」が1つもない場合は、
-      // 次の本を用意している最中や背景とみなして、警告音もエラー表示も一切出さずに静かにお休みする！
-      if (isContinuousCamera && !isColophon) {
+      // 連続カメラの自動スキャン中は、「明確な未登録ISBN（exactIsbns）」が検出された時だけ未登録エラーを鳴らし、
+      // 本の移動中や部分的な文字だけのフレームでは一切エラーを鳴らさず静かにすぐ次のフレームへ進む！
+      if (isContinuousCamera && features.exactIsbns.length === 0) {
         return { matched: false, count: 0, status: "RESTING_NON_COLOPHON" };
       }
       const detectedSample =
@@ -526,14 +502,18 @@
         features.fuzzyIsbnPrefixes[0]?.digits ||
         (features.lines[0] ? features.lines[0].slice(0, 22) : "読取文字");
 
+      // 同じ未登録ISBNで連続して何度も鳴らないようにする
+      if (isContinuousCamera && state.lastUnmatchedIsbn === detectedSample) {
+        return { matched: false, count: 0, status: "RESTING_NON_COLOPHON" };
+      }
+      state.lastUnmatchedIsbn = detectedSample;
+
       state.mobileLastMatchInfo = {
         sourceLabel,
         status: "NO_CANDIDATE",
-        statusLabel: `❌ 蔵書リストに該当する図書がありません（奥付読取: "${detectedSample}"）`
+        statusLabel: `❌ 蔵書リストに該当する図書がありません（読取: "${detectedSample}"）`
       };
       if (!silentInit) {
-        // 未登録の奥付をずっと写しっぱなしの時に何度も連続で鳴らないよう、直前と同じ未登録奥付なら3.5秒間クールタイムを入れる
-        state.cooldownUntilMs = Date.now() + 3500;
         triggerScanFeedback("ERROR");
         showToast(`❌ 蔵書リストに該当する図書がありません（読取: ${detectedSample}）`, "error");
       }
@@ -541,13 +521,14 @@
       return { matched: false, count: 0, status: "NO_CANDIDATE" };
     }
 
+    state.lastUnmatchedIsbn = "";
     state.mobileLastMatchInfo = {
       sourceLabel,
       ...matchResult
     };
     state.mobileCandidates = matchResult.candidates;
 
-    // B. 蔵書リストに該当するものが「1冊」であれば、スキャンした瞬間に候補として自動確定！
+    // B. 蔵書リストに該当するものが「1冊」であれば、スキャンした瞬間に自動確定（レストタイム0秒ですぐ次へ）！
     if (matchResult.candidates.length === 1 && !silentInit) {
       const singleBook = matchResult.candidates[0].book;
       const destConfig = getActiveDestinationConfig();
@@ -560,20 +541,19 @@
           workerNote: destConfig.workerNote
         });
 
-        // 対策③：1冊スキャンが完了した直後は、次の本を用意するための 3.5秒間のクールタイム（お休み）を入れる
-        state.cooldownUntilMs = Date.now() + 3500;
-
         if (addRes.added) {
           state.mobileSelectedList = addRes.list;
           state.awaitingDisambiguation = false;
           saveMobileSessionToStorage();
           triggerScanFeedback("SUCCESS");
-          showToast(`✅ 1冊確定: ${singleBook.book_id}『${singleBook.title}』（3.5秒間、次の本の準備でお休みします）`, "success");
+          showToast(`✅ 1冊確定: ${singleBook.book_id}『${singleBook.title}』`, "success");
         } else {
-          // 既に直前に登録したばかりの本がまだカメラの前にある場合は静かにスルー
+          // 既に登録済みの本がカメラの前に残っている間は、連続カメラ時は無音でスルー（手動実行時のみ通知）
           if (!isContinuousCamera) {
             triggerScanFeedback("ERROR");
             showToast(`⚠️ ${addRes.message}`, "error");
+          } else {
+            return { matched: true, count: 1, status: "ALREADY_CONFIRMED_SILENT" };
           }
         }
       } else {
@@ -592,6 +572,14 @@
       renderMobileSelectedList();
       updateMobileBoxValidationUi();
       return { matched: true, count: 1, status: "AUTO_CONFIRMED" };
+    }
+
+    // C. 複数ヒットした場合：もしその複数候補のうち1冊が「すでに登録済み」で、同じ本がカメラに映り続けているだけなら再ポップアップしない
+    if (
+      isContinuousCamera &&
+      state.lastConfirmedMultiKey === matchResult.candidates.map((c) => c.book.book_id).join(",")
+    ) {
+      return { matched: true, count: matchResult.candidates.length, status: "ALREADY_CONFIRMED_SILENT" };
     }
 
     // C. 複数ヒットした場合（または初回デモ表示時）：いずれの図書かを特定するまで次のスキャンを一時ロック！
@@ -797,12 +785,12 @@
     }
 
     state.mobileSelectedList = res.list;
-    // 特定が完了したのでポップアップを閉じ、3.5秒間の準備クールタイムを入れて次のスキャンを再開！
+    // 特定が完了したのでポップアップを閉じ、同じ複数候補セットでの再ポップアップを抑止して即座に次のスキャンを再開！
+    state.lastConfirmedMultiKey = state.mobileCandidates.map((c) => c.book.book_id).join(",");
     state.awaitingDisambiguation = false;
-    state.cooldownUntilMs = Date.now() + 3500;
     const statusPill = document.getElementById("cameraStatusPill");
     if (statusPill && state.cameraStream) {
-      statusPill.textContent = "✅ 図書を特定・確定しました！（3.5秒間、次の本の準備でお休み中...）";
+      statusPill.textContent = "✅ 図書を特定・確定しました！続けて次の奥付をスキャンできます";
     }
 
     triggerScanFeedback("SUCCESS");
@@ -942,12 +930,12 @@
       btnStart.disabled = true;
       btnStop.disabled = false;
       btnSnapNow.disabled = false;
-      statusPill.textContent = "連続読取中（約2.2秒間隔で自動フレーム解析）";
+      statusPill.textContent = "🟢 高速連続読取中（奥付をかざしてください）";
 
-      // 連続フレーム解析ループを開始（シャッター操作不要）
+      // 連続フレーム解析ループを開始（1.1秒間隔・レストタイムなし）
       state.cameraIntervalId = setInterval(() => {
         analyzeCurrentVideoFrame(false);
-      }, 2200);
+      }, 1100);
     } catch (err) {
       statusPill.textContent = "カメラ起動不可（権限拒否または非HTTPS）";
       showToast(
@@ -1012,28 +1000,12 @@
       return;
     }
 
-    // 対策③：1冊確定した直後の3.5秒間（次の本を用意するクールタイム中）はスキャンをお休みする
-    if (!forceRun && Date.now() < state.cooldownUntilMs) {
-      const remSec = ((state.cooldownUntilMs - Date.now()) / 1000).toFixed(1);
-      statusPill.textContent = `☕ 次の本をご用意ください（スキャンお休み中 あと${remSec}秒）`;
-      return;
-    }
-
     state.isOcrBusy = true;
     try {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // 1. 600pxグレースケール＆コントラスト強調キャンバスを作成（OCR処理時間を約3〜4倍高速化）
+      prepareFastOcrCanvas(video, canvas);
 
-      // 対策②：カメラや本が動いている最中（本を入れ替えている間）はOCR自体をお休みする
-      if (!forceRun && isCameraFrameMoving(canvas)) {
-        statusPill.textContent = "👋 本の移動・カメラの動きを検知（静止すると自動でスキャンします）";
-        state.isOcrBusy = false;
-        return;
-      }
-
-      // 1. ブラウザが BarcodeDetector (EAN_13 / ISBNバーコード) に対応している場合は高速併用
+      // 2. ブラウザが BarcodeDetector (EAN_13 / ISBNバーコード) に対応している場合は高速併用
       if ("BarcodeDetector" in window) {
         try {
           const detector = new window.BarcodeDetector({ formats: ["ean_13", "qr_code"] });
@@ -1046,9 +1018,9 @@
                 isContinuousCamera: !forceRun
               });
               if (res.status === "AUTO_CONFIRMED") {
-                statusPill.textContent = `✅ 1冊即時確定 (${codeVal}) ― 3.5秒お休み後に次の本をスキャンします`;
+                statusPill.textContent = `🟢 確定完了 (${codeVal}) ― 続けて次の奥付をかざしてください`;
               } else if (res.status === "MULTIPLE_AWAITING") {
-                statusPill.textContent = `⏸️ 複数候補（${res.count}冊）特定待ち ― ポップアップで選択してください`;
+                statusPill.textContent = `⏸️ 複数候補（${res.count}冊）特定待ち`;
               } else if (res.status === "NO_CANDIDATE") {
                 statusPill.textContent = `❌ 蔵書リストに該当なし (${codeVal})`;
               }
@@ -1059,8 +1031,7 @@
         } catch (_) {}
       }
 
-      // 2. ブラウザ内OCR (Tesseract.js) で奥付文字を認識
-      statusPill.textContent = "奥付フレームを解析中...";
+      // 3. ブラウザ内OCR (Tesseract.js) で奥付文字を高速認識（「解析中…」と出し続けず常時スムーズ表示）
       const worker = await ensureTesseractLoaded();
       const { data } = await worker.recognize(canvas);
       const recognizedText = (data && data.text ? data.text : "").trim();
@@ -1073,17 +1044,17 @@
             isContinuousCamera: !forceRun
           });
           if (res.status === "AUTO_CONFIRMED") {
-            statusPill.textContent = `✅ 1冊即時確定完了！（計 ${state.mobileSelectedList.length} 冊確定済）― 次の本の準備でお休み中`;
+            statusPill.textContent = `🟢 1冊確定完了！（計 ${state.mobileSelectedList.length} 冊）― すぐ次の奥付をかざせます`;
           } else if (res.status === "MULTIPLE_AWAITING") {
             statusPill.textContent = `⏸️ 複数候補（${res.count}冊）特定待ち ― ポップアップで選択してください`;
           } else if (res.status === "NO_CANDIDATE") {
-            statusPill.textContent = "❌ 奥付を検出しましたが蔵書リストに該当がありません";
+            statusPill.textContent = "❌ 未登録のISBNを検出（蔵書リストに該当なし）";
           } else {
-            statusPill.textContent = "☕ 待機中（奥付を写していないためスキャンお休み中）";
+            statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
           }
         }
       } else {
-        statusPill.textContent = "☕ 待機中（奥付を枠内に合わせて静止してください）";
+        statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
       }
     } catch (err) {
       statusPill.textContent = "ブラウザ内OCR待機中（オフライン時は下のテキスト認識入力をご利用ください）";
