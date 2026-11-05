@@ -338,38 +338,42 @@ body {
   border-left-color: var(--success);
 }
 
-/* カメラ・連続読取ビューポート */
+/* カメラ・連続読取ビューポート（iPhone縦持ちで映像とガイド枠が絶対にズレない構造） */
 .camera-box {
   position: relative;
   width: 100%;
+  aspect-ratio: 4 / 3;
+  height: 260px;
   background-color: #0f172a;
   border-radius: 10px;
   overflow: hidden;
-  min-height: 220px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   color: #94a3b8;
   margin-bottom: 10px;
 }
 
 .camera-box video {
+  position: absolute;
+  top: 0;
+  left: 0;
   width: 100%;
-  max-height: 300px;
+  height: 100%;
   object-fit: cover;
+  object-position: center center;
   display: block;
 }
 
 .camera-guide-overlay {
   position: absolute;
-  inset: 14px;
-  border: 2px dashed rgba(56, 189, 248, 0.85);
+  inset: 12px;
+  border: 2px dashed rgba(56, 189, 248, 0.9);
   border-radius: 8px;
   pointer-events: none;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   padding: 8px;
+  z-index: 2;
 }
 
 .camera-status-pill {
