@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>蔵書保管場所 変更・記録システム</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+  <!-- データ種別常時明示バナー（デモデータと本番データの混同防止） -->
+  <div id="dataModeBanner" class="data-mode-banner is-demo">
+    <div>
+      <span id="dataModeBadge" class="badge badge-demo">デモデータ稼働中</span>
+      <span id="dataModeText">現在は開発・検証用の架空データ（105件・添付書籍4冊含む）を表示しています。実データではありません。</span>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span id="catalogCountLabel" style="font-size:0.8rem;">蔵書件数: 0件</span>
+      <button type="button" id="btnResetToDemo" class="btn btn-outline btn-sm">デモデータに戻す</button>
+    </div>
+  </div>
+
+  <!-- アプリヘッダー（iPhone現場モード / PC台帳管理モード切替） -->
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="app-title-group">
+        <h1 class="app-title">蔵書保管場所 変更・記録ツール</h1>
+      </div>
+      <div class="mode-switch-group" role="tablist" aria-label="利用端末モード切替">
+        <button type="button" id="btnSwitchMobile" class="mode-btn active" role="tab" aria-selected="true">
+          📱 iPhone現場モード（読取・選択）
+        </button>
+        <button type="button" id="btnSwitchPc" class="mode-btn" role="tab" aria-selected="false">
+          💻 PC台帳管理モード（比較・出力）
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-container">
+    <!-- 長時間処理用の進捗表示パネル -->
+    <div id="globalProgressPanel" class="progress-panel hidden" role="status" aria-live="polite">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <strong id="progressStepText">処理中...</strong>
+        <span id="progressMetaText">0 / 0件 (経過: 0.0秒)</span>
+      </div>
+      <div class="progress-bar-track">
+        <div id="progressBarFill" class="progress-bar-fill"></div>
+      </div>
+    </div>
+
+    <!-- =================================================================== -->
+    <!-- 📱 1. iPhone現場モード（片手操作・連続読取・候補照合・移動先付与） -->
+    <!-- =================================================================== -->
+    <section id="mobileViewSection" class="view-section mobile-view">
+
+      <!-- ステップ0: 照合用データの確認・読込 -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">📂 1. 照合対象リストの確認・読込</h2>
+          <span id="mobileCatalogStatus" class="badge badge-demo">デモ蔵書 105件</span>
+        </div>
+        <p style="margin:0 0 8px 0; font-size:0.83rem; color:var(--text-sub);">
+          PC側で出力した「スマホ用照合データ(JSON/CSV)」を読み込むか、現在のデモデータのまま操作を体験できます。
+        </p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;">
+            📥 照合ファイル読込 (JSON/CSV)
+            <input type="file" id="mobileLoadCatalogInput" accept=".json,.csv" class="hidden" />
+          </label>
+          <button type="button" id="btnMobileClearStorage" class="btn btn-outline btn-sm">
+            🧹 端末内の作業途中データを消去
+          </button>
+        </div>
+      </div>
+
+      <!-- ステップ1: 移動先の指定（連続登録のために先に固定セット） -->
+      <div class="card" style="border-left: 5px solid var(--primary);">
+        <div class="card-header">
+          <h2 class="card-title">📍 2. 移動先の保管場所を指定（連続登録用）</h2>
+        </div>
+        <p style="margin:0 0 10px 0; font-size:0.83rem; color:var(--text-sub);">
+          一度移動先を設定すると、同じ書架や同じ箱へ移す複数冊を続けて登録できます。
+        </p>
+
+        <div class="form-group">
+          <label class="form-label">移動先種別の選択</label>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <button type="button" id="btnDestModeHq" class="btn btn-primary">🏢 本部内の書架・保管場所</button>
+            <button type="button" id="btnDestModeWarehouse" class="btn btn-outline">📦 外部倉庫（日高）箱詰め</button>
+          </div>
+        </div>
+
+        <!-- 本部内保管場所の入力欄 -->
+        <div id="hqDestConfigArea">
+          <div class="form-group">
+            <label class="form-label" for="mobileHqLocationInput">移動先の保管場所（自由入力 または よく使う書架から選択）</label>
+            <input type="text" id="mobileHqLocationInput" class="input" placeholder="例: 本部 4F イノベーション書架B-1" value="本部 4F イノベーション書架B-1" />
+          </div>
+          <div class="form-group">
+            <select id="mobileHqPresetSelect" class="select">
+              <option value="">▼ 定型書架から選ぶ（選択すると上の欄に入力されます）</option>
+              <option value="本部 4F イノベーション書架B-1">本部 4F イノベーション書架B-1</option>
+              <option value="本部 3F 企画書架A-2">本部 3F 企画書架A-2</option>
+              <option value="本部 5F 法務書架C-1">本部 5F 法務書架C-1</option>
+              <option value="本部 2F 人事書架D-3">本部 2F 人事書架D-3</option>
+              <option value="本部 2F 書庫ロッカー1">本部 2F 書庫ロッカー1</option>
+              <option value="本部 6F システム書架S-2">本部 6F システム書架S-2</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 外部倉庫（日高）箱番号の設定欄 -->
+        <div id="warehouseDestConfigArea" class="hidden" style="background:var(--accent-warehouse-light); padding:12px; border-radius:8px; margin-bottom:10px;">
+          <div style="font-size:0.82rem; color:#4c1d95; margin-bottom:8px; font-weight:600;">
+            📦 日高倉庫 文書箱管理番号（形式: 部室G-年度2桁-通し番号4桁BOK ／ 仮番号不可）
+          </div>
+          <div class="form-row" style="grid-template-columns: 1fr 90px auto; align-items:end; margin-bottom:8px;">
+            <div>
+              <label class="form-label" for="mobileBoxDeptInput">部・Gコード（自由入力可）</label>
+              <input type="text" id="mobileBoxDeptInput" class="input" placeholder="例: 1101" value="1101" />
+            </div>
+            <div>
+              <label class="form-label" for="mobileBoxYearInput">年度2桁</label>
+              <input type="text" id="mobileBoxYearInput" class="input" placeholder="26" value="26" maxlength="2" />
+            </div>
+            <div>
+              <button type="button" id="btnSuggestNextBoxMobile" class="btn btn-warehouse">次番号を提示</button>
+            </div>
+          </div>
+          <div class="form-group" style="margin-bottom:6px;">
+            <label class="form-label" for="mobileBoxNumberInput">使用する箱管理番号</label>
+            <input type="text" id="mobileBoxNumberInput" class="input" placeholder="例: 1101-26-0001BOK" value="1101-26-0003BOK" />
+          </div>
+          <div id="mobileBoxValidationStatus" class="alert alert-info" style="margin-bottom:0; padding:8px 10px; font-size:0.8rem;">
+            箱管理番号の形式と重複を自動確認します。
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" for="mobileWorkerNoteInput">作業メモ（任意・全冊または個別付与）</label>
+          <input type="text" id="mobileWorkerNoteInput" class="input" placeholder="例: 2026年秋 棚卸し移動" />
+        </div>
+      </div>
+
+      <!-- ステップ2: 奥付の読取（カメラ連続読取 / 模擬OCR検証 / 手動検索） -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">📷 3. 奥付の読取・図書検索</h2>
+        </div>
+
+        <!-- 読取モード切替ボタン -->
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-bottom:12px;">
+          <button type="button" id="btnScanTabCamera" class="btn btn-primary btn-sm">📷 実機カメラ読取</button>
+          <button type="button" id="btnScanTabMockOcr" class="btn btn-outline btn-sm">🧪 模擬OCR検証</button>
+          <button type="button" id="btnScanTabManual" class="btn btn-outline btn-sm">🔍 手動キーワード検索</button>
+        </div>
+
+        <!-- (A) 実機カメラ連続読取パネル -->
+        <div id="scanPanelCamera">
+          <div class="alert alert-info" style="font-size:0.8rem; padding:8px 10px;">
+            <strong>連続スキャンについて:</strong> カメラ開始後、シャッターを押さなくても約2秒ごとにフレームから文字・ISBNを自動解析し候補を表示します。<br/>
+            ※同じ本を続けて映しても勝手に確定・二重追加はされません。必ず下の候補リストから人が選択してください。
+          </div>
+
+          <div class="camera-box" id="cameraViewport">
+            <video id="cameraVideo" playsinline muted></video>
+            <canvas id="cameraCaptureCanvas" class="hidden"></canvas>
+            <div class="camera-guide-overlay">
+              <span id="cameraStatusPill" class="camera-status-pill">カメラ停止中</span>
+              <span style="font-size:0.75rem; color:#e2e8f0; background:rgba(15,23,42,0.75); padding:3px 8px; border-radius:4px; align-self:center;">
+                書籍の「奥付（書名・ISBN・発行所）」を枠内に合わせてください
+              </span>
+            </div>
+          </div>
+
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:10px;">
+            <button type="button" id="btnStartCamera" class="btn btn-primary">▶️ カメラ開始（連続読取）</button>
+            <button type="button" id="btnStopCamera" class="btn btn-danger" disabled>⏹️ カメラ停止</button>
+          </div>
+
+          <!-- カメラが使えない環境や反射時の代替操作（静止画選択 & iOS標準テキスト認識入力） -->
+          <div style="background:var(--bg-subtle); border:1px solid var(--border-color); border-radius:8px; padding:10px; font-size:0.82rem;">
+            <div style="font-weight:700; margin-bottom:6px; color:var(--text-main);">
+              💡 カメラが起動できない場合・ピントが合いにくい場合の代替手段:
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+              <label class="btn btn-outline btn-sm" style="cursor:pointer;">
+                📸 奥付写真を選択してブラウザ内OCR実行
+                <input type="file" id="cameraPhotoFallbackInput" accept="image/*" capture="environment" class="hidden" />
+              </label>
+              <button type="button" id="btnAnalyzeCurrentFrameNow" class="btn btn-outline btn-sm" disabled>
+                ⚡ 今すぐ現フレームを解析
+              </button>
+            </div>
+            <div>
+              <label class="form-label" for="iosLiveTextInput" style="font-size:0.78rem;">
+                または iPhone標準キーボードの「テキスト認識表示（カメラアイコン）」で奥付を読み取ってそのまま照合:
+              </label>
+              <div style="display:flex; gap:6px;">
+                <input type="text" id="iosLiveTextInput" class="input" placeholder="ここをタップ→キーボードのカメラ読取またはISBN入力" />
+                <button type="button" id="btnRunLiveTextMatch" class="btn btn-primary btn-sm" style="white-space:nowrap;">照合</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- (B) 模擬OCR検証パネル（実機カメラなしで全ケースを検証可能） -->
+        <div id="scanPanelMockOcr" class="hidden">
+          <div class="alert alert-warning" style="font-size:0.8rem; padding:8px 10px;">
+            <strong>【検証用・模擬OCRモード】</strong> ここは照合ロジックを検証するための模擬OCR文字列入力です（実際のカメラOCR成功結果ではありません）。添付いただいた4冊の奥付ケースやOCR誤読ケースをワンタップで再現できます。
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="mockOcrPresetSelect">模擬OCRテストケースを選択</label>
+            <select id="mockOcrPresetSelect" class="select"></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="mockOcrRawTextarea">読み取った奥付テキスト（自由に編集して照合テスト可能）</label>
+            <textarea id="mockOcrRawTextarea" class="textarea" rows="5"></textarea>
+          </div>
+          <button type="button" id="btnExecuteMockOcrMatch" class="btn btn-primary btn-block">
+            🔍 この模擬OCR文字列で蔵書リストと照合する
+          </button>
+        </div>
+
+        <!-- (C) 手動検索パネル（ISBNなし・OCR誤認識時の即時切替先） -->
+        <div id="scanPanelManual" class="hidden">
+          <div class="form-group">
+            <label class="form-label" for="mobileManualSearchInput">図書登録番号・書名・ISBN・著者・出版社で検索</label>
+            <div style="display:flex; gap:6px;">
+              <input type="search" id="mobileManualSearchInput" class="input" placeholder="例: BK-00001 / 交通事故 / 人事制度 / 00120" />
+              <button type="button" id="btnMobileManualSearch" class="btn btn-primary">検索</button>
+            </div>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button type="button" class="btn btn-outline btn-sm quick-search-btn" data-query="AIを使って考える">添付1: AIを使って…</button>
+            <button type="button" class="btn btn-outline btn-sm quick-search-btn" data-query="組織を進化させていく">添付2: そして僕たちは…</button>
+            <button type="button" class="btn btn-outline btn-sm quick-search-btn" data-query="交通事故賠償法">添付3: 交通事故賠償法</button>
+            <button type="button" class="btn btn-outline btn-sm quick-search-btn" data-query="人事制度の基本">添付4: 人事制度の基本</button>
+            <button type="button" class="btn btn-outline btn-sm quick-search-btn" data-query="規程集">ISBNなし図書</button>
+            <button type="button" class="btn btn-outline btn-sm quick-search-btn" data-query="0012">先頭ゼロ登録番号</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ステップ3: 照合結果・候補一覧（人が現物と図書登録番号を確認して選択） -->
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">✅ 4. 照合候補の確認と選択（自動確定しません）</h2>
+          <button type="button" id="btnSwitchToManualFromResult" class="btn btn-outline btn-sm">🔍 手動検索へ切替</button>
+        </div>
+
+        <div id="matchStatusBanner" class="alert alert-info">
+          上の「実機カメラ読取」「模擬OCR検証」「手動検索」のいずれかを実行すると、ここに候補が表示されます。
+        </div>
+
+        <div id="candidatesContainer"></div>
+      </div>
+
+      <!-- ステップ4: 選択済み一覧・中断再開・変更用CSV/QR出力 -->
+      <div class="card" style="border-top: 4px solid var(--success);">
+        <div class="card-header">
+          <h2 class="card-title">📋 5. 選択確定済み一覧（<span id="mobileSelectedCount">0</span>冊）</h2>
+          <span style="font-size:0.78rem; color:var(--success); font-weight:700;">💾 端末内に自動保存中（中断・再開対応）</span>
+        </div>
+
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+          <button type="button" id="btnExportMobileCsv" class="btn btn-success" style="flex:1;">
+            📤 変更用CSVを出力
+          </button>
+          <button type="button" id="btnShowMobileQr" class="btn btn-primary" style="flex:1;">
+            🔳 PC受け渡し用QRコード表示
+          </button>
+        </div>
+
+        <!-- QRコード表示エリア（トグル表示） -->
+        <div id="mobileQrArea" class="qr-display-box hidden" style="margin-bottom:12px;">
+          <div style="font-weight:700; font-size:0.9rem; margin-bottom:4px;">
+            📲 PCへ変更データを受け渡すQRコード
+          </div>
+          <p style="font-size:0.78rem; color:var(--text-sub); margin:0 0 6px 0;">
+            PC側の「変更データ取込・比較」タブでカメラ読取またはQRテキスト貼付ができます（外部通信は一切行いません）。
+          </p>
+          <canvas id="mobileQrCanvas"></canvas>
+          <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+            <button type="button" id="btnPrevQrPage" class="btn btn-outline btn-sm">◀ 前へ</button>
+            <span id="mobileQrPageLabel" style="font-size:0.85rem; font-weight:700;">1 / 1</span>
+            <button type="button" id="btnNextQrPage" class="btn btn-outline btn-sm">次へ ▶</button>
+          </div>
+          <div style="width:100%; margin-top:8px; text-align:left;">
+            <label class="form-label" style="font-size:0.75rem;">QRペイロード文字列（コピーしてTeams/メール等で送ることも可能）</label>
+            <textarea id="mobileQrPayloadText" class="textarea" rows="2" readonly style="font-size:0.75rem; min-height:50px;"></textarea>
+          </div>
+        </div>
+
+        <div id="mobileSelectedListContainer"></div>
+      </div>
+
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- 💻 2. PC台帳管理モード（一覧・CSV取込・変更前後比較・外部倉庫帳票・履歴） -->
+    <!-- =================================================================== -->
+    <section id="pcViewSection" class="view-section hidden">
+
+      <!-- PCサブナビゲーション -->
+      <nav class="sub-nav" aria-label="PC管理メニュー">
+        <button type="button" class="sub-tab-btn active" data-pctab="pcTabCatalog">📚 1. 蔵書一覧・検索・スマホ用出力</button>
+        <button type="button" class="sub-tab-btn" data-pctab="pcTabImport">📥 2. 台帳CSV取込・列マッピング・検証</button>
+        <button type="button" class="sub-tab-btn" data-pctab="pcTabDiff">🔍 3. スマホ変更データの取込・変更前後比較・更新CSV出力</button>
+        <button type="button" class="sub-tab-btn" data-pctab="pcTabWarehouse">📦 4. 外部倉庫（日高）管理・別紙2-3出力</button>
+        <button type="button" class="sub-tab-btn" data-pctab="pcTabHistory">🕒 5. 変更履歴・バックアップと復元</button>
+      </nav>
+
+      <!-- PCタブ1: 蔵書一覧・検索・スマホ用照合データ出力 -->
+      <div id="pcTabCatalog" class="pc-tab-panel">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">📚 蔵書一覧・検索（図書登録番号ベース管理）</h2>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" id="btnExportPhoneJson" class="btn btn-primary btn-sm">
+                📱 スマホ用照合データ出力 (JSON)
+              </button>
+              <button type="button" id="btnExportCatalogCsv" class="btn btn-outline btn-sm">
+                📄 現在の蔵書台帳をCSV出力（別ファイル）
+              </button>
+            </div>
+          </div>
+
+          <div class="form-row" style="margin-bottom:12px;">
+            <div>
+              <label class="form-label" for="pcCatalogSearchInput">キーワード検索（登録番号・ISBN・書名・著者・箱番号等）</label>
+              <input type="search" id="pcCatalogSearchInput" class="input" placeholder="例: BK-00001 / 交通事故 / 1101-26-0001BOK" />
+            </div>
+            <div>
+              <label class="form-label" for="pcFilterDept">所管部署フィルタ</label>
+              <select id="pcFilterDept" class="select">
+                <option value="">すべての所管部署</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="pcFilterStorage">保管区分フィルタ</label>
+              <select id="pcFilterStorage" class="select">
+                <option value="">すべて（本部内＋外部倉庫）</option>
+                <option value="HQ">🏢 本部内保管のみ</option>
+                <option value="WAREHOUSE">📦 外部倉庫（日高）保管のみ</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="pcFilterIsbn">ISBN有無フィルタ</label>
+              <select id="pcFilterIsbn" class="select">
+                <option value="">すべて</option>
+                <option value="HAS_ISBN">ISBNあり</option>
+                <option value="NO_ISBN">ISBNなし（非売品・規程集等）</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="margin-bottom:8px; font-size:0.85rem; color:var(--text-sub); display:flex; justify-content:space-between;">
+            <span id="pcCatalogFilterSummary">表示中: 0件</span>
+            <span>※ISBNチェックディジット異常データもアイコンで区別表示します</span>
+          </div>
+
+          <div class="table-wrap" style="max-height:540px; overflow-y:auto;">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>図書登録番号</th>
+                  <th>ISBN / 形式検証</th>
+                  <th>書名</th>
+                  <th>著者・編者 / 出版社</th>
+                  <th>発行年 / 版・巻号</th>
+                  <th>所管部署</th>
+                  <th>現在の保管場所</th>
+                  <th>外部倉庫 箱管理番号</th>
+                  <th>備考</th>
+                </tr>
+              </thead>
+              <tbody id="pcCatalogTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PCタブ2: CSV取込・列マッピング・台帳データ検証 -->
+      <div id="pcTabImport" class="pc-tab-panel hidden">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">📥 既存台帳CSVの取込と列の対応付け（カラムマッピング）</h2>
+          </div>
+          <div class="alert alert-info">
+            <strong>実データの列構成が未確定でも対応可能:</strong> 任意のCSVファイルを選択すると、元データの列名と本ツールの標準項目（11項目）を画面上で対応付け（マッピング）して取り込めます。元ファイルは一切変更・上書きされません。
+          </div>
+
+          <div class="form-row" style="align-items:end; margin-bottom:14px;">
+            <div>
+              <label class="form-label" for="pcCsvFileInput">1. 取り込む台帳CSVファイルを選択</label>
+              <input type="file" id="pcCsvFileInput" accept=".csv,.txt" class="input" />
+            </div>
+            <div>
+              <label class="form-label" for="pcCsvEncodingSelect">文字コード指定</label>
+              <select id="pcCsvEncodingSelect" class="select">
+                <option value="UTF-8">UTF-8（BOMあり/なし自動対応）</option>
+                <option value="Shift_JIS">Shift_JIS (CP932 / Windows Excel標準)</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="pcCsvDataKindSelect">データの位置づけ</label>
+              <select id="pcCsvDataKindSelect" class="select">
+                <option value="PRODUCTION">本番データとして扱う（デモ表示を解除し別領域に保持）</option>
+                <option value="DEMO">検証用デモデータとして扱う</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 列マッピング設定エリア（ファイル選択後に表示） -->
+          <div id="columnMappingSection" class="hidden" style="background:var(--bg-subtle); padding:14px; border-radius:8px; border:1px solid var(--border-color); margin-bottom:14px;">
+            <h3 style="margin:0 0 8px 0; font-size:0.95rem;">2. 元CSVの列と標準項目の対応付け（自動推定済み・変更可能）</h3>
+            <div id="columnMappingGrid" class="form-row" style="grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));"></div>
+            <div style="margin-top:12px; display:flex; gap:10px;">
+              <button type="button" id="btnApplyMappedCsv" class="btn btn-primary">
+                ✅ この列対応付けで検証・取込を実行する
+              </button>
+            </div>
+          </div>
+
+          <!-- 図書登録番号の重複・必須項目・ISBN形式チェック結果 -->
+          <div id="catalogValidationResultBox"></div>
+        </div>
+      </div>
+
+      <!-- PCタブ3: スマホ変更データの取込・変更前後比較・台帳更新用CSV出力 -->
+      <div id="pcTabDiff" class="pc-tab-panel hidden">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">🔍 スマホで作成した変更データの取込と変更前後（Diff）比較</h2>
+          </div>
+
+          <div class="form-row" style="margin-bottom:14px;">
+            <div style="background:var(--bg-subtle); padding:12px; border-radius:8px; border:1px solid var(--border-color);">
+              <label class="form-label">方法A: iPhoneで出力した「変更用CSV/JSON」ファイルを選択</label>
+              <input type="file" id="pcImportChangesFileInput" accept=".csv,.json" class="input" style="margin-bottom:8px;" />
+              <button type="button" id="btnLoadChangesFromMobileSession" class="btn btn-outline btn-sm btn-block">
+                🔄 同一ブラウザ内の「iPhone現場モード」選択済みリストを直接読み込む
+              </button>
+            </div>
+
+            <div style="background:var(--bg-subtle); padding:12px; border-radius:8px; border:1px solid var(--border-color);">
+              <label class="form-label" for="pcQrPasteInput">方法B: iPhoneで表示したQRコード読取文字列（またはカメラ読取）で取込</label>
+              <div style="display:flex; gap:6px; margin-bottom:6px;">
+                <input type="text" id="pcQrPasteInput" class="input" placeholder="QR文字列 (BLM_CHG...) を貼り付け" />
+                <button type="button" id="btnImportQrText" class="btn btn-primary btn-sm" style="white-space:nowrap;">QR反映</button>
+              </div>
+              <button type="button" id="btnStartPcQrCamera" class="btn btn-outline btn-sm btn-block">
+                📷 PCカメラでiPhone画面のQRコードを読み取る
+              </button>
+              <div id="pcQrCameraBox" class="camera-box hidden" style="min-height:160px; margin-top:8px;">
+                <video id="pcQrVideo" playsinline muted></video>
+              </div>
+            </div>
+          </div>
+
+          <!-- 比較一覧と更新対象選択 -->
+          <div id="pcDiffSummaryBanner" class="alert alert-info">
+            変更データを取り込むと、現在の台帳データとの「変更前 → 変更後」の比較一覧が表示されます。
+          </div>
+
+          <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:10px;">
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button type="button" id="btnDiffSelectAll" class="btn btn-outline btn-sm">☑️ すべて選択</button>
+              <button type="button" id="btnDiffDeselectAll" class="btn btn-outline btn-sm">⬜ すべて解除</button>
+              <label style="font-size:0.83rem; display:inline-flex; align-items:center; gap:4px; margin-left:8px;">
+                <input type="checkbox" id="chkProtectLeadingZero" />
+                Excel先頭ゼロ保護形式（<code>="00120"</code>）でCSV出力する
+              </label>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" id="btnApplyDiffToMemory" class="btn btn-primary btn-sm">
+                💾 選択した変更を画面上の台帳へ反映＆変更履歴に記録
+              </button>
+              <button type="button" id="btnExportUpdatedCatalogCsv" class="btn btn-success btn-sm">
+                📤 更新済みの全件台帳CSVを別ファイル出力
+              </button>
+              <button type="button" id="btnExportDiffOnlyCsv" class="btn btn-outline btn-sm">
+                📄 変更差分のみのCSVを出力
+              </button>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>更新対象</th>
+                  <th>状態</th>
+                  <th>図書登録番号</th>
+                  <th>書名 / 所管部署</th>
+                  <th>保管場所（変更前 ➔ 変更後）</th>
+                  <th>外部倉庫箱番号（変更前 ➔ 変更後）</th>
+                  <th>作業メモ / 記録日時</th>
+                </tr>
+              </thead>
+              <tbody id="pcDiffTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PCタブ4: 外部倉庫（日高倉庫）箱管理・別紙2-3転記用データ出力 -->
+      <div id="pcTabWarehouse" class="pc-tab-panel hidden">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">📦 外部倉庫（日高倉庫）箱管理・次番号採番・別紙2-3転記用データ出力</h2>
+          </div>
+
+          <div class="alert alert-warning">
+            <strong>運用上の重要事項:</strong><br/>
+            ・このアプリは箱詰め記録・所在データ更新・別紙2-3転記用データの作成を行いますが、<strong>倉庫会社への正式な申請・集荷依頼・入出庫手続きを自動で実施するものではありません。</strong><br/>
+            ・預け先は日高倉庫の文書箱（管理番号形式: <code>部室G-年度2桁-通し番号4桁BOK</code>、仮番号不可）です。出庫は箱単位とし、一部抜き取り後の再入庫は手動記録となります。
+          </div>
+
+          <!-- 部・G・年度ごとの次番号確認シミュレータ -->
+          <div style="background:var(--bg-subtle); padding:12px; border-radius:8px; border:1px solid var(--border-color); margin-bottom:16px;">
+            <h3 style="margin:0 0 8px 0; font-size:0.95rem;">🔢 部・G・年度ごとの次番号提示＆箱管理番号チェッカー</h3>
+            <div class="form-row" style="align-items:end;">
+              <div>
+                <label class="form-label" for="pcBoxDeptInput">部室Gコード（特定部署に固定されません）</label>
+                <input type="text" id="pcBoxDeptInput" class="input" value="1101" placeholder="例: 1101, 1302, 0105, GA01" />
+              </div>
+              <div>
+                <label class="form-label" for="pcBoxYearInput">年度（西暦下2桁）</label>
+                <input type="text" id="pcBoxYearInput" class="input" value="26" maxlength="2" />
+              </div>
+              <div>
+                <button type="button" id="btnPcSuggestBox" class="btn btn-warehouse">次の空き箱番号を計算</button>
+              </div>
+              <div>
+                <label class="form-label" for="pcCheckBoxNumberInput">任意の箱番号の形式・重複チェック</label>
+                <input type="text" id="pcCheckBoxNumberInput" class="input" placeholder="例: 1101-26-0001BOK" />
+              </div>
+            </div>
+            <div id="pcBoxCheckerResult" class="alert alert-info" style="margin-top:10px; margin-bottom:0;">
+              部室Gコードと年度を入力して「次の空き箱番号を計算」を押してください。
+            </div>
+          </div>
+
+          <!-- 別紙2-3 転記用データ一覧とCSV出力 -->
+          <div class="card-header" style="margin-top:8px;">
+            <h3 class="card-title" style="font-size:0.98rem;">📄 別紙2-3 転記用データプレビュー（箱単位集計・名称100文字以内自動調整）</h3>
+            <button type="button" id="btnExportBesshi23Csv" class="btn btn-success btn-sm">
+              📤 別紙2-3 転記用CSVを出力
+            </button>
+          </div>
+          <p style="font-size:0.82rem; color:var(--text-sub); margin:0 0 8px 0;">
+            ※正式様式の現物そのものではなく、正式様式へ転記・貼付するためのデータ（文書等種類:「文書」、保存期限:「永久 / 2999/12/31」、名称:「図書（部署名）計○冊：主な書名…」100文字以内）を出力します。
+          </p>
+
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>箱管理番号</th>
+                  <th>文書等種類</th>
+                  <th>保存期限</th>
+                  <th>保存期限日付値</th>
+                  <th>名称（100文字以内自動生成）</th>
+                  <th>文字数</th>
+                  <th>冊数</th>
+                  <th>格納されている図書登録番号</th>
+                </tr>
+              </thead>
+              <tbody id="pcBesshi23TableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- PCタブ5: 変更履歴の保存・バックアップと復元 -->
+      <div id="pcTabHistory" class="pc-tab-panel hidden">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">🕒 変更履歴の保存・バックアップと復元・端末内データ管理</h2>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" id="btnDownloadBackupJson" class="btn btn-primary btn-sm">
+                💾 全体バックアップファイル保存 (JSON)
+              </button>
+              <label class="btn btn-outline btn-sm" style="cursor:pointer;">
+                📂 バックアップファイルから復元
+                <input type="file" id="pcRestoreBackupInput" accept=".json" class="hidden" />
+              </label>
+              <button type="button" id="btnClearAllLocalData" class="btn btn-danger btn-sm">
+                🗑️ ブラウザ内保存データを全消去
+              </button>
+            </div>
+          </div>
+
+          <div class="alert alert-info" style="font-size:0.83rem;">
+            <strong>端末内保存（LocalStorage）の仕様と分離設計:</strong><br/>
+            ・デモデータの状態（<code>blm_demo_state_v1</code>）と本番データの状態（<code>blm_prod_state_v1</code>）、スマホ作業途中データ（<code>blm_mobile_session_v1</code>）、変更履歴（<code>blm_change_history_v1</code>）はキーを分離してブラウザ内に保存されます。<br/>
+            ・保存期間は無期限（ブラウザのキャッシュ消去または上の「全消去」ボタンを押すまで保持）です。外部サーバーへは一切送信されません。
+          </div>
+
+          <h3 style="font-size:0.95rem; margin:12px 0 8px 0;">変更履歴ログ</h3>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>実行日時</th>
+                  <th>データ種別</th>
+                  <th>更新件数</th>
+                  <th>主な変更内容</th>
+                  <th>操作（当時のスナップショット復元）</th>
+                </tr>
+              </thead>
+              <tbody id="pcHistoryTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- トースト通知領域 -->
+  <div id="toastContainer" class="toast-container" aria-live="assertive"></div>
+
+  <!-- スクリプト読込（ローカル完結・外部への業務データ送信ゼロ） -->
+  <script src="js/demo_data.js"></script>
+  <script src="js/core_logic.js"></script>
+  <script src="js/qrcode_mini.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
