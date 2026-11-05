@@ -252,12 +252,8 @@
     setMobileDestinationMode(state.mobileDestMode);
     refreshAllViews();
 
-    // 初期状態でスキャンストックが空なら、添付書籍1の模擬OCR候補を1件入れておき、すぐ体験できるようにする
-    if (state.mobileScannedBatches.length === 0 && state.mockOcrCases.length > 0) {
-      runMockOcrByIndex(0, true);
-    } else {
-      renderCandidatesList();
-    }
+    // 初期描画
+    renderCandidatesList();
   }
 
   function saveCurrentCatalogToStorage() {
@@ -596,16 +592,22 @@
 
   function executeMobileManualSearch(queryText) {
     const results = Core.searchBooksManually(queryText, state.catalogBooks);
-    const status =
-      results.length === 0
-        ? "NO_CANDIDATE"
-        : results.length === 1
-        ? "CANDIDATES_FOUND"
-        : "MULTIPLE_CANDIDATES";
-    const statusLabel =
-      results.length === 0
-        ? `「${queryText}」に一致する図書は見つかりませんでした。別のキーワードをお試しください。`
-        : `手動検索で ${results.length} 件ヒットしました（表示上限30件）。図書登録番号を確認して「選択」を押してください。`;
+    if (results.length === 0) {
+      state.mobileLastMatchInfo = {
+        sourceLabel: `【手動検索: "${queryText || ""}"】`,
+        status: "NO_CANDIDATE",
+        statusLabel: `❌ 「${queryText}」に一致する図書は見つかりませんでした。`
+      };
+      state.mobileCandidates = [];
+      triggerScanFeedback("ERROR");
+      renderCandidatesList();
+      return;
+    }
+
+    if (results.length === 1) {
+      executeOcrTextMatch(results[0].book_id + " " + results[0].title, `【手動検索1冊確定】`);
+      return;
+    }
 
     const candidates = results.slice(0, 30).map((b) => ({
       book: b,
@@ -616,35 +618,25 @@
     }));
 
     state.mobileLastMatchInfo = {
-      sourceLabel: `【手動キーワード検索: "${queryText || "全件"}"】`,
-      status,
-      statusLabel,
+      sourceLabel: `【手動検索: "${queryText || "全件"}"】`,
+      status: "MULTIPLE_CANDIDATES",
+      statusLabel: `手動検索で ${results.length} 冊ヒットしました。対象の図書をタップして特定してください。`,
       requiresManualCheck: true
     };
     state.mobileCandidates = candidates;
-
-    if (candidates.length > 0) {
-      pushToScannedBatches({
-        sourceLabel: `【手動検索: "${queryText || "全件"}"】`,
-        status,
-        statusLabel,
-        candidates
-      });
-    }
-
+    state.awaitingDisambiguation = true;
+    triggerScanFeedback("MULTI");
     renderCandidatesList();
   }
 
-  // 連続スキャン候補ストック＆候補カードの描画（カメラが外れても絶対に消えない）
+  // 複数ヒット時のポップアップ（モーダル）描画＆ステータスバナー更新
   function renderCandidatesList() {
     const banner = document.getElementById("matchStatusBanner");
+    const modal = document.getElementById("multiHitModal");
+    const modalTitle = document.getElementById("multiHitModalTitle");
+    const modalSub = document.getElementById("multiHitModalSub");
     const container = document.getElementById("candidatesContainer");
-    const batchCountSpan = document.getElementById("scannedBatchCount");
     if (!banner || !container) return;
-
-    if (batchCountSpan) {
-      batchCountSpan.textContent = String(state.mobileScannedBatches.length);
-    }
 
     const info = state.mobileLastMatchInfo;
     if (info && info.status === "NO_CANDIDATE") {
@@ -652,33 +644,20 @@
       banner.innerHTML = `<strong>${escapeHtml(info.sourceLabel)}</strong><br/>${escapeHtml(info.statusLabel)}`;
     } else if (state.awaitingDisambiguation) {
       banner.className = "alert alert-warning";
-      banner.innerHTML = `
-        <strong>⏸️ 複数冊ヒットしました！いずれの図書か特定してください（特定するまで次のカメラ読取を一時停止中）</strong><br/>
-        下の候補カードから現物と一致する図書登録番号を1つ選ぶと、確定されて次の奥付スキャンが再開します。
-      `;
-    } else if (state.mobileScannedBatches.length > 0) {
+      banner.innerHTML = `<strong>⏸️ 複数冊ヒット（${state.mobileCandidates.length}冊）― ポップアップ画面で図書を特定してください</strong>`;
+    } else if (state.mobileSelectedList.length > 0) {
+      const latest = state.mobileSelectedList[0];
       banner.className = "alert alert-success";
-      banner.innerHTML = `
-        <strong>✅ スキャン履歴・候補ストック（${state.mobileScannedBatches.length}件）</strong><br/>
-        1冊ヒット時は即座に確定されます。複数ヒット時は下のカードから対象図書を特定してください。
-      `;
+      banner.innerHTML = `<strong>✅ 直近確定: ${escapeHtml(latest.book_id)}『${escapeHtml(latest.title)}』</strong> ― 続けて次の奥付をスキャンできます`;
     } else {
       banner.className = "alert alert-info";
-      banner.innerHTML =
-        "奥付をスキャンすると、<strong>1冊該当ならその場で自動確定</strong>し、<strong>複数該当なら図書を特定してから次のスキャンへ進む</strong>ことができます。";
+      banner.innerHTML = "奥付をスキャンすると、1冊該当なら即座に一覧へ確定され、複数該当ならポップアップ画面で特定できます。";
     }
 
-    if (state.mobileScannedBatches.length === 0) {
-      container.innerHTML = `
-        <div style="text-align:center; padding:16px; background:var(--bg-subtle); border-radius:8px;">
-          <p style="margin:0 0 10px 0; font-size:0.88rem; color:var(--text-sub);">現在表示中のスキャン候補はありません。</p>
-          <button type="button" class="btn btn-primary btn-sm" id="btnEmptyJumpManual">🔍 手動キーワード検索を開く</button>
-        </div>
-      `;
-      const jumpBtn = document.getElementById("btnEmptyJumpManual");
-      if (jumpBtn) {
-        jumpBtn.addEventListener("click", () => switchMobileScanTab("MANUAL"));
-      }
+    // 複数ヒット特定待ちでない場合はポップアップを閉じる
+    if (!state.awaitingDisambiguation || state.mobileCandidates.length === 0) {
+      if (modal) modal.classList.add("hidden");
+      container.innerHTML = "";
       return;
     }
 
@@ -687,64 +666,41 @@
       ? `📦 ${destConfig.location}`
       : `🏢 ${destConfig.location || "(移動先未入力)"}`;
 
-    container.innerHTML = state.mobileScannedBatches
-      .map((batch, bIdx) => {
-        const cardsHtml = batch.candidates
-          .map((cand) => {
-            const b = cand.book;
-            const alreadySelected = state.mobileSelectedList.some((s) => s.book_id === b.book_id);
-            const reasonsHtml = (cand.reasons || [])
-              .map((r) => `<span class="reason-pill">${escapeHtml(r)}</span>`)
-              .join("");
+    if (modal) modal.classList.remove("hidden");
+    if (modalTitle) {
+      modalTitle.textContent = `⚠️ ${state.mobileCandidates.length}冊ヒット：いずれの図書か特定してください`;
+    }
+    if (modalSub) {
+      modalSub.textContent = `${info ? info.sourceLabel : ""} ― 現物と一致する1冊をタップすると確定され、次のスキャンへ進みます。`;
+    }
 
-            return `
-              <div class="candidate-card ${alreadySelected ? "is-already-selected" : cand.score >= 100 ? "high-match" : ""}">
-                <div class="candidate-id-row">
-                  <span class="book-id-tag">登録番号: ${escapeHtml(b.book_id)}</span>
-                  <span style="font-size:0.8rem; font-weight:700; color:${alreadySelected ? "var(--success)" : "var(--primary)"};">
-                    ${alreadySelected ? "✅ 選択確定済み" : `照合スコア: ${cand.score}`}
-                  </span>
-                </div>
-                <h3 class="candidate-title">${escapeHtml(b.title)}</h3>
-                <div class="match-reasons">${reasonsHtml}</div>
-                <div class="candidate-meta-grid">
-                  <div><strong>版・巻号:</strong> ${escapeHtml(b.edition || "未登録")} (${escapeHtml(b.pub_year || "-")}年)</div>
-                  <div><strong>所管部署:</strong> ${escapeHtml(b.department || "未登録")}</div>
-                  <div><strong>ISBN:</strong> ${escapeHtml(b.isbn || "なし")}</div>
-                  <div><strong>著者/出版:</strong> ${escapeHtml(b.author || "-")} / ${escapeHtml(b.publisher || "-")}</div>
-                  <div style="grid-column: span 2;"><strong>現在場所:</strong> ${escapeHtml(b.location || "未登録")} ${b.box_number ? `(箱:${escapeHtml(b.box_number)})` : ""}</div>
-                  ${b.notes ? `<div style="grid-column: span 2; color:var(--warning);"><strong>備考:</strong> ${escapeHtml(b.notes)}</div>` : ""}
-                </div>
-                <button
-                  type="button"
-                  class="btn ${alreadySelected ? "btn-outline" : "btn-primary"} btn-block btn-select-candidate"
-                  data-book-id="${escapeHtml(b.book_id)}"
-                  ${alreadySelected ? "disabled" : ""}
-                >
-                  ${alreadySelected
-                    ? `✅ 選択済みです（登録番号: ${escapeHtml(b.book_id)}）`
-                    : `👆 この図書（${escapeHtml(b.book_id)}）を選択し「${escapeHtml(destLabel)}」へ登録`}
-                </button>
-              </div>
-            `;
-          })
-          .join("");
-
+    container.innerHTML = state.mobileCandidates
+      .map((cand) => {
+        const b = cand.book;
+        const alreadySelected = state.mobileSelectedList.some((s) => s.book_id === b.book_id);
         return `
-          <div style="border:2px solid #cbd5e1; border-radius:10px; padding:10px; margin-bottom:14px; background:#f8fafc;">
-            <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid #cbd5e1;">
-              <div style="font-size:0.82rem; font-weight:700; color:#1e3a8a;">
-                📌 読取 #${state.mobileScannedBatches.length - bIdx} ${escapeHtml(batch.sourceLabel)}
-                <span style="color:var(--text-muted); font-weight:400;">(${escapeHtml(batch.detectedAt)})</span>
-              </div>
-              <button type="button" class="btn btn-outline btn-sm btn-remove-batch" data-batch-idx="${bIdx}" style="min-height:28px; padding:2px 8px; font-size:0.75rem;">
-                ✕ この読取を消す
-              </button>
+          <div class="candidate-card ${alreadySelected ? "is-already-selected" : "high-match"}" style="padding:10px; margin-bottom:8px;">
+            <div class="candidate-id-row" style="margin-bottom:4px;">
+              <span class="book-id-tag" style="font-size:0.85rem;">${escapeHtml(b.book_id)}</span>
+              <span style="font-size:0.78rem; font-weight:700; color:var(--text-sub);">
+                ${escapeHtml(b.edition || "版未登録")} (${escapeHtml(b.pub_year || "-")}年) / ${escapeHtml(b.department || "-")}
+              </span>
             </div>
-            <div style="font-size:0.78rem; color:#92400e; margin-bottom:8px; font-weight:600;">
-              ${escapeHtml(batch.statusLabel)}
+            <div style="font-weight:700; font-size:0.92rem; margin-bottom:4px;">${escapeHtml(b.title)}</div>
+            <div style="font-size:0.78rem; color:var(--text-sub); margin-bottom:8px;">
+              現在場所: <strong>${escapeHtml(b.location || "未登録")}</strong>
+              ${b.notes ? ` / <span style="color:var(--warning);">${escapeHtml(b.notes)}</span>` : ""}
             </div>
-            ${cardsHtml}
+            <button
+              type="button"
+              class="btn ${alreadySelected ? "btn-outline" : "btn-primary"} btn-sm btn-block btn-select-candidate"
+              data-book-id="${escapeHtml(b.book_id)}"
+              ${alreadySelected ? "disabled" : ""}
+            >
+              ${alreadySelected
+                ? `✅ スキャン完了済み（${escapeHtml(b.book_id)}）`
+                : `👆 この図書（${escapeHtml(b.book_id)}）に特定して確定（➔ ${escapeHtml(destLabel)}）`}
+            </button>
           </div>
         `;
       })
@@ -754,16 +710,6 @@
       btn.addEventListener("click", () => {
         const bookId = btn.getAttribute("data-book-id");
         handleSelectCandidateBook(bookId);
-      });
-    });
-
-    container.querySelectorAll(".btn-remove-batch").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const idx = parseInt(btn.getAttribute("data-batch-idx"), 10);
-        state.mobileScannedBatches.splice(idx, 1);
-        state.awaitingDisambiguation = false;
-        saveMobileSessionToStorage();
-        renderCandidatesList();
       });
     });
   }
@@ -793,11 +739,11 @@
     }
 
     state.mobileSelectedList = res.list;
-    // 複数候補から特定が完了したので、カメラ連続読取の一時ロックを解除して次のスキャンを再開！
+    // 特定が完了したのでポップアップを閉じ、カメラ連続読取ロックを解除して次のスキャンを再開！
     state.awaitingDisambiguation = false;
     const statusPill = document.getElementById("cameraStatusPill");
     if (statusPill && state.cameraStream) {
-      statusPill.textContent = "✅ 図書を特定・登録しました！続けて次の奥付をスキャンしてください";
+      statusPill.textContent = "✅ 図書を特定・確定しました！続けて次の奥付をスキャンしてください";
     }
 
     triggerScanFeedback("SUCCESS");
@@ -808,7 +754,7 @@
     showToast(res.message, "success");
   }
 
-  // 選択済み一覧の描画と取消
+  // 4. スキャン完了した図書一覧（本が特定できる最小情報のみのスリム表示）
   function renderMobileSelectedList() {
     const countSpan = document.getElementById("mobileSelectedCount");
     const bulkCountSpan = document.getElementById("mobileBulkUpdateCount");
@@ -822,8 +768,8 @@
 
     if (state.mobileSelectedList.length === 0) {
       container.innerHTML = `
-        <div style="text-align:center; padding:16px; color:var(--text-muted); font-size:0.88rem;">
-          まだ選択された図書はありません。上の候補リストから図書を選択するとここに追加されます。
+        <div style="text-align:center; padding:12px; color:var(--text-muted); font-size:0.83rem; background:#fff;">
+          まだスキャン完了した図書はありません。
         </div>
       `;
       return;
@@ -832,24 +778,17 @@
     container.innerHTML = state.mobileSelectedList
       .map((item, idx) => {
         return `
-          <div style="border:1px solid var(--border-color); border-radius:8px; padding:10px; margin-bottom:8px; background:#fff; display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
-            <div style="font-size:0.84rem;">
-              <div>
-                <span class="book-id-tag" style="font-size:0.8rem; padding:2px 6px;">${escapeHtml(item.book_id)}</span>
+          <div class="compact-book-row">
+            <div style="min-width:0; flex:1;">
+              <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                <span class="book-id-tag" style="font-size:0.75rem; padding:1px 6px; margin-right:4px;">${escapeHtml(item.book_id)}</span>
                 <strong>${escapeHtml(item.title)}</strong>
               </div>
-              <div style="color:var(--text-sub); margin-top:4px;">
-                <span class="diff-old">${escapeHtml(item.old_location || "(未設定)")}</span>
-                ➔
-                <span class="diff-new">${escapeHtml(item.new_location)}</span>
-                ${item.new_box_number ? `<span class="badge" style="background:#ede9fe; color:#6d28d9;">箱: ${escapeHtml(item.new_box_number)}</span>` : ""}
-              </div>
-              <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px;">
-                版: ${escapeHtml(item.edition || "-")} / 部署: ${escapeHtml(item.department || "-")}
-                ${item.worker_note ? ` / メモ: ${escapeHtml(item.worker_note)}` : ""}
+              <div style="font-size:0.74rem; color:var(--text-sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px;">
+                ${escapeHtml(item.edition || "-")} / ${escapeHtml(item.department || "-")} ➔ <span class="diff-new">${escapeHtml(item.new_location)}</span>
               </div>
             </div>
-            <button type="button" class="btn btn-outline btn-sm btn-remove-selected" data-index="${idx}" style="color:var(--danger); border-color:var(--danger); white-space:nowrap;">
+            <button type="button" class="btn btn-outline btn-sm btn-remove-selected" data-index="${idx}" style="min-height:28px; padding:2px 8px; font-size:0.74rem; color:var(--danger); border-color:var(--danger); flex-shrink:0;">
               取消
             </button>
           </div>
@@ -1625,15 +1564,16 @@
       showToast("iPhone側の選択済み作業データとスキャン候補ストックを消去しました。");
     });
 
-    const btnClearBatches = document.getElementById("btnClearScannedBatches");
-    if (btnClearBatches) {
-      btnClearBatches.addEventListener("click", () => {
-        state.mobileScannedBatches = [];
+    const btnCancelMultiModal = document.getElementById("btnCancelMultiModal");
+    if (btnCancelMultiModal) {
+      btnCancelMultiModal.addEventListener("click", () => {
         state.awaitingDisambiguation = false;
-        state.lastFrameSignature = "";
-        saveMobileSessionToStorage();
+        state.mobileCandidates = [];
         renderCandidatesList();
-        showToast("スキャン検出候補ストックと特定待ちロックをクリアしました。");
+        const statusPill = document.getElementById("cameraStatusPill");
+        if (statusPill && state.cameraStream) {
+          statusPill.textContent = "連続読取中（キャンセルされました ― 次の奥付をスキャンできます）";
+        }
       });
     }
 
