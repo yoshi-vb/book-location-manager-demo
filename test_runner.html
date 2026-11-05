@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>ブラウザ内 単体テスト実行ランナー - 蔵書保管場所変更アプリ</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body style="padding:20px;">
+  <div class="card" style="max-width:960px; margin:0 auto;">
+    <div class="card-header">
+      <h1 class="card-title">🧪 JavaScript コアロジック＆QRコード 自動テストランナー</h1>
+      <a href="index.html" class="btn btn-primary btn-sm">⬅️ アプリ画面へ戻る</a>
+    </div>
+    <div id="testSummary" class="alert alert-info">テストを実行しています...</div>
+    <canvas id="testQrCanvas" class="hidden"></canvas>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>結果</th>
+            <th>テスト項目</th>
+            <th>詳細・検証結果</th>
+          </tr>
+        </thead>
+        <tbody id="testResultBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="js/demo_data.js"></script>
+  <script src="js/core_logic.js"></script>
+  <script src="js/qrcode_mini.js"></script>
+  <script>
+    (function () {
+      const Core = window.BookLocationCore;
+      const QR = window.QRCodeMini;
+      const dataset = window.DEMO_DATASET;
+      const books = dataset.books;
+      const mockOcr = dataset.mock_ocr_cases;
+      const results = [];
+
+      function assert(name, condition, detail) {
+        results.push({ name, pass: Boolean(condition), detail: detail || "" });
+      }
+
+      // 1. 同一ISBN複本の自動確定禁止テスト
+      const resOcr1 = Core.matchBooksFromOcr(mockOcr[0].raw_text, books);
+      assert(
+        "1. 同一ISBNの複数冊（AIを使って考えるための全技術）を自動確定せず MULTIPLE_CANDIDATES にする",
+        resOcr1.status === "MULTIPLE_CANDIDATES" && resOcr1.candidates.length >= 2,
+        `status=${resOcr1.status}, 候補数=${resOcr1.candidates.length} (BK-00001, BK-00002)`
+      );
+
+      // 2. 著者略歴内の他書引用ノイズ抑制テスト
+      const resOcr2 = Core.matchBooksFromOcr(mockOcr[1].raw_text, books);
+      assert(
+        "2. 添付2『そして僕たちは、組織を進化させていく』が最上位候補になる",
+        resOcr2.candidates.length >= 1 && resOcr2.candidates[0].book.book_id === "BK-00003",
+        `最上位候補=${resOcr2.candidates[0]?.book.book_id} (${resOcr2.candidates[0]?.book.title})`
+      );
+
+      // 3. ISBN-10 認識と旧版区別テスト
+      const resOcr3 = Core.matchBooksFromOcr(mockOcr[2].raw_text, books);
+      assert(
+        "3. 添付3『［新版］概説 交通事故賠償法』(ISBN-10: 4-535-51343-0)の照合",
+        resOcr3.candidates.length >= 1 && resOcr3.candidates[0].book.book_id === "BK-00004",
+        `最上位候補=${resOcr3.candidates[0]?.book.book_id}`
+      );
+
+      // 4. OCR誤認識時の MANUAL_CHECK_REQUIRED 判定
+      const resOcr5 = Core.matchBooksFromOcr(mockOcr[4].raw_text, books);
+      assert(
+        "4. OCR誤認識（A1を使って… / ISBN末尾文字化け）時に MANUAL_CHECK_REQUIRED を返す",
+        resOcr5.status === "MANUAL_CHECK_REQUIRED" && resOcr5.candidates.length >= 1,
+        `status=${resOcr5.status}`
+      );
+
+      // 5. ISBNなし図書の手動検索
+      const manualHits = Core.searchBooksManually("日高文書倉庫 運用手順", books);
+      assert(
+        "5. ISBNなし図書（社内規程集）を手動検索できる",
+        manualHits.length === 1 && manualHits[0].book_id === "BK-00019",
+        `ヒット=${manualHits[0]?.book_id}`
+      );
+
+      // 6. 同一図書の二重追加防止
+      let list = [];
+      const add1 = Core.addBookToSelection(list, books[0], { mode: "HQ", location: "本部 4F A-1" });
+      list = add1.list;
+      const add2 = Core.addBookToSelection(list, books[0], { mode: "HQ", location: "本部 4F A-1" });
+      assert(
+        "6. 同一図書（BK-00001）の二重追加をブロックする",
+        add1.added === true && add2.added === false && add2.reason === "DUPLICATE_BOOK_ID",
+        `1回目=${add1.added}, 2回目=${add2.added} (${add2.reason})`
+      );
+
+      // 7. CSV先頭ゼロ保持とパース往復検証
+      const zeroBooks = books.filter((b) => b.book_id.startsWith("00"));
+      const csvProtected = Core.generateCsvText(Core.STANDARD_FIELDS, zeroBooks, { protectLeadingZeros: true });
+      const parsedBack = Core.parseCsvText(csvProtected);
+      assert(
+        "7. CSV出力と再取込で先頭ゼロ（00120）と日本語が壊れない",
+        parsedBack.records[0]["図書登録番号"] === "00120",
+        `復元された登録番号="${parsedBack.records[0]["図書登録番号"]}"`
+      );
+
+      // 8. 箱管理番号検証・次番号提示・別紙2-3の100文字制限
+      const vBoxOk = Core.validateBoxNumber("1101-26-0001BOK", books, []);
+      const vBoxTemp = Core.validateBoxNumber("仮-26-0001BOK", books, []);
+      const nextBox = Core.suggestNextBoxNumber("1101", "26", books, []);
+      const boxMap = new Map([["1101-26-0001BOK", books.filter((b) => b.box_number === "1101-26-0001BOK")]]);
+      const besshiRows = Core.buildBesshi23Rows(boxMap);
+      assert(
+        "8. 日高倉庫の箱管理番号検証・仮番号拒否・次番号提示・別紙2-3の100文字制限",
+        vBoxOk.isValid && !vBoxTemp.isValid && nextBox === "1101-26-0003BOK" && besshiRows[0].name_length <= 100,
+        `次番号=${nextBox}, 別紙2-3名称長=${besshiRows[0].name_length}文字`
+      );
+
+      // 9. QRコードエンコード・描画・デコード往復テスト
+      const qrChunks = Core.encodeChangesToQrChunks(list, 6);
+      const qrDrawInfo = QR.renderToCanvas(document.getElementById("testQrCanvas"), qrChunks[0].jsonText, 200);
+      const qrDecoded = Core.decodeQrChunkText(qrChunks[0].jsonText);
+      assert(
+        "9. QRコードの生成・Canvas描画・デコード復元が外部通信なしで完結する",
+        qrDecoded.isValid && qrDecoded.records[0].book_id === "BK-00001" && qrDrawInfo.version >= 1,
+        `QR Version=${qrDrawInfo.version}, 復元ID=${qrDecoded.records[0].book_id}`
+      );
+
+      const passCount = results.filter((r) => r.pass).length;
+      const summary = document.getElementById("testSummary");
+      summary.className = passCount === results.length ? "alert alert-success" : "alert alert-danger";
+      summary.innerHTML = `<strong>全 ${results.length} 項目中 ${passCount} 項目成功</strong>`;
+
+      document.getElementById("testResultBody").innerHTML = results
+        .map(
+          (r) => `
+          <tr>
+            <td>${r.pass ? "✅ PASS" : "❌ FAIL"}</td>
+            <td><strong>${r.name}</strong></td>
+            <td><code>${r.detail}</code></td>
+          </tr>
+        `
+        )
+        .join("");
+    })();
+  </script>
+</body>
+</html>
