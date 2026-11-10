@@ -451,18 +451,18 @@
   }
 
   /**
-   * カメラフレームの中央ガイド枠エリア（82%）を切り抜き、軽量サイズ（横幅最大480px）の
-   * グレースケール＆コントラスト強調画像へ変換する。周囲の机・背景ノイズをカットしつつOCR速度を大幅に向上させる。
+   * カメラフレームの中央ガイド枠エリア（86%）を切り抜き、小文字の漢字・数字も潰れない720px幅の
+   * グレースケール＆コントラスト強調画像へ変換する。周囲の机・背景ノイズをカットしつつ1発でのOCR認識率と速度を両立する。
    */
   function prepareFastOcrCanvas(video, targetCanvas) {
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const cropRatio = 0.82;
+    const cropRatio = 0.86;
     const sx = Math.round(vw * ((1 - cropRatio) / 2));
     const sy = Math.round(vh * ((1 - cropRatio) / 2));
     const sw = Math.max(1, Math.round(vw * cropRatio));
     const sh = Math.max(1, Math.round(vh * cropRatio));
-    const scale = Math.min(1, 480 / sw);
+    const scale = Math.min(1, 720 / sw);
     const w = Math.max(1, Math.round(sw * scale));
     const h = Math.max(1, Math.round(sh * scale));
     targetCanvas.width = w;
@@ -488,7 +488,7 @@
    * 1. 該当する図書が「1冊のみ」の場合 ➔ 待ち時間ゼロで即座に自動確定（既に確定済みの本が映り続けている間は静かにスルー）
    * 2. 「複数ヒット」した場合 ➔ ポップアップで特定するまで次のスキャンを一時停止（ロック）
    * 3. 「該当なし」の場合 ➔ 奥付ページ（ISBNまたは本の奥付定型語）を検知したのにDBに該当がない場合は、
-   *    即座に「該当なし」を返し、読み取った言葉からワンタップで手動検索できるようにする
+   *    即座に警告音・赤フラッシュ・画面表示で「該当なし」を返し、読み取った言葉からワンタップで手動検索できるようにする
    */
   function executeOcrTextMatch(rawText, sourceLabel = "【OCR読取結果】", options = {}) {
     const isContinuousCamera = Boolean(options.isContinuousCamera);
@@ -505,8 +505,9 @@
     // A. 蔵書リストに該当するものがない場合
     if (matchResult.candidates.length === 0) {
       const isColophonDetected = features.exactIsbns.length > 0 || Boolean(features.isColophonPage);
-      // 連続カメラの自動スキャン中は、机や背景など「奥付ページではないフレーム」は静かにスルーして次フレームへ進む
+      // 連続カメラの自動スキャン中は、机や背景など「奥付ページではないフレーム」は静かにスルーし、未登録本のロックも解除する
       if (isContinuousCamera && !isColophonDetected) {
+        state.lastUnmatchedIsbn = "";
         return { matched: false, count: 0, status: "RESTING_NON_COLOPHON" };
       }
       const detectedSample =
@@ -515,11 +516,17 @@
         features.searchKeywords?.[0] ||
         (features.lines[0] ? features.lines[0].slice(0, 22) : "読取文字");
 
-      // 同じ未登録本をかざし続けている間に連続で何度も警告音が鳴らないようにする
-      if (isContinuousCamera && state.lastUnmatchedIsbn === detectedSample) {
-        return { matched: false, count: 0, status: "RESTING_NON_COLOPHON" };
+      const nowMs = Date.now();
+      // 同じ未登録本をかざし続けている3.5秒間は連続で何度も警告音が鳴らないようにする
+      if (
+        isContinuousCamera &&
+        state.lastUnmatchedIsbn === detectedSample &&
+        nowMs < (state.unmatchedAlertUntilMs || 0)
+      ) {
+        return { matched: false, count: 0, status: "NO_CANDIDATE_HOLD", detectedSample };
       }
       state.lastUnmatchedIsbn = detectedSample;
+      state.unmatchedAlertUntilMs = nowMs + 3500;
 
       state.mobileLastMatchInfo = {
         sourceLabel,
@@ -530,13 +537,14 @@
       };
       if (!silentInit) {
         triggerScanFeedback("ERROR");
-        showToast(`⚠️ 該当する図書が見つかりません（読取: ${detectedSample}）`, "error");
+        showToast(`❌ 蔵書リストに該当する図書がありません（読取: ${detectedSample}）`, "error");
       }
       renderCandidatesList();
-      return { matched: false, count: 0, status: "NO_CANDIDATE" };
+      return { matched: false, count: 0, status: "NO_CANDIDATE", detectedSample };
     }
 
     state.lastUnmatchedIsbn = "";
+    state.unmatchedAlertUntilMs = 0;
     state.mobileLastMatchInfo = {
       sourceLabel,
       ...matchResult
@@ -953,17 +961,29 @@
 
     try {
       statusPill.textContent = "カメラ起動中...";
+      statusPill.style.backgroundColor = "rgba(15, 23, 42, 0.82)";
+      statusPill.style.color = "#38bdf8";
+
+      // 再開時に黒帯（レターボックス）が出ないよう、端末の自然なカメラ比率＋object-fit:coverで全面描画する
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
+          facingMode: { ideal: "environment" }
         },
         audio: false
       });
 
       state.cameraStream = stream;
       video.srcObject = stream;
+      video.style.width = "100%";
+      video.style.height = "100%";
+      video.style.objectFit = "cover";
+      await new Promise((resolve) => {
+        if (video.readyState >= 1) {
+          resolve();
+        } else {
+          video.onloadedmetadata = () => resolve();
+        }
+      });
       await video.play();
 
       btnStart.disabled = true;
@@ -1011,11 +1031,22 @@
       state.cameraStream.getTracks().forEach((t) => t.stop());
       state.cameraStream = null;
     }
-    if (video) video.srcObject = null;
+    if (video) {
+      try {
+        video.pause();
+        video.srcObject = null;
+        video.removeAttribute("src");
+        video.load();
+      } catch (_) {}
+    }
     if (btnStart) btnStart.disabled = false;
     if (btnStop) btnStop.disabled = true;
     if (btnSnapNow) btnSnapNow.disabled = true;
-    if (statusPill) statusPill.textContent = "カメラ停止中";
+    if (statusPill) {
+      statusPill.style.backgroundColor = "rgba(15, 23, 42, 0.82)";
+      statusPill.style.color = "#38bdf8";
+      statusPill.textContent = "カメラ停止中";
+    }
   }
 
   async function ensureTesseractLoaded() {
@@ -1051,32 +1082,39 @@
 
     // 複数冊ヒットして利用者が特定（選択）中の場合は、勝手に次の奥付を読み取らないようポーズする
     if (state.awaitingDisambiguation && !forceRun) {
+      statusPill.style.backgroundColor = "rgba(180, 83, 9, 0.92)";
+      statusPill.style.color = "#ffffff";
       statusPill.textContent = "⏸️ 複数候補の特定待ち ― ポップアップ画面から1冊選択してください";
       return;
     }
 
     state.isOcrBusy = true;
     try {
-      // 1. 中央ガイド枠切り抜き＋480pxグレースケール＆コントラスト強調キャンバスを作成
+      // 1. 中央ガイド枠切り抜き＋720pxグレースケール＆コントラスト強調キャンバスを作成
       prepareFastOcrCanvas(video, canvas);
 
       // 2. ブラウザが BarcodeDetector (EAN_13 / ISBNバーコード) に対応している場合は高速併用
       if ("BarcodeDetector" in window) {
         try {
           const detector = new window.BarcodeDetector({ formats: ["ean_13", "qr_code"] });
-          const barcodes = await detector.detect(canvas);
+          const barcodes = await detector.detect(video);
           if (barcodes && barcodes.length > 0) {
             const codeVal = barcodes[0].rawValue;
-            if (codeVal && codeVal !== state.lastFrameSignature) {
-              state.lastFrameSignature = codeVal;
+            if (codeVal) {
               const res = executeOcrTextMatch(`ISBN ${codeVal}`, "【カメラ読取（ISBNバーコード）】", {
                 isContinuousCamera: !forceRun
               });
               if (res.status === "AUTO_CONFIRMED") {
+                statusPill.style.backgroundColor = "rgba(22, 101, 52, 0.92)";
+                statusPill.style.color = "#ffffff";
                 statusPill.textContent = `🟢 確定完了 (${codeVal}) ― 続けて次の奥付をかざしてください`;
               } else if (res.status === "MULTIPLE_AWAITING") {
+                statusPill.style.backgroundColor = "rgba(180, 83, 9, 0.92)";
+                statusPill.style.color = "#ffffff";
                 statusPill.textContent = `⏸️ 複数候補（${res.count}冊）特定待ち`;
-              } else if (res.status === "NO_CANDIDATE") {
+              } else if (res.status === "NO_CANDIDATE" || res.status === "NO_CANDIDATE_HOLD") {
+                statusPill.style.backgroundColor = "rgba(185, 28, 28, 0.94)";
+                statusPill.style.color = "#ffffff";
                 statusPill.textContent = `❌ 蔵書リストに該当なし (${codeVal})`;
               }
               state.isOcrBusy = false;
@@ -1086,29 +1124,39 @@
         } catch (_) {}
       }
 
-      // 3. ブラウザ内OCR (Tesseract.js) で奥付文字を高速認識（「解析中…」と出し続けず常時スムーズ表示）
+      // 3. ブラウザ内OCR (Tesseract.js) で奥付文字を高速認識
       const worker = await ensureTesseractLoaded();
       const { data } = await worker.recognize(canvas);
       const recognizedText = (data && data.text ? data.text : "").trim();
 
-      if (recognizedText.length >= 4) {
-        const normSig = Core.normalizeText(recognizedText).slice(0, 40);
-        if (forceRun || normSig !== state.lastFrameSignature) {
-          state.lastFrameSignature = normSig;
-          const res = executeOcrTextMatch(recognizedText, "【実機カメラ ブラウザ内OCR】", {
-            isContinuousCamera: !forceRun
-          });
-          if (res.status === "AUTO_CONFIRMED") {
-            statusPill.textContent = `🟢 1冊確定完了！（計 ${state.mobileSelectedList.length} 冊）― すぐ次の奥付をかざせます`;
-          } else if (res.status === "MULTIPLE_AWAITING") {
-            statusPill.textContent = `⏸️ 複数候補（${res.count}冊）特定待ち ― ポップアップで選択してください`;
-          } else if (res.status === "NO_CANDIDATE") {
-            statusPill.textContent = "⚠️ 奥付を検出しましたが該当図書がありません（下の読取文字から検索可）";
-          } else {
-            statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
-          }
+      if (recognizedText.length >= 3) {
+        const res = executeOcrTextMatch(recognizedText, "【実機カメラ ブラウザ内OCR】", {
+          isContinuousCamera: !forceRun
+        });
+        if (res.status === "AUTO_CONFIRMED") {
+          statusPill.style.backgroundColor = "rgba(22, 101, 52, 0.92)";
+          statusPill.style.color = "#ffffff";
+          statusPill.textContent = `🟢 1冊確定完了！（計 ${state.mobileSelectedList.length} 冊）― すぐ次の奥付をかざせます`;
+        } else if (res.status === "MULTIPLE_AWAITING") {
+          statusPill.style.backgroundColor = "rgba(180, 83, 9, 0.92)";
+          statusPill.style.color = "#ffffff";
+          statusPill.textContent = `⏸️ 複数候補（${res.count}冊）特定待ち ― ポップアップで選択してください`;
+        } else if (res.status === "NO_CANDIDATE" || res.status === "NO_CANDIDATE_HOLD") {
+          statusPill.style.backgroundColor = "rgba(185, 28, 28, 0.94)";
+          statusPill.style.color = "#ffffff";
+          statusPill.textContent = `❌ 該当図書なし（読取: "${res.detectedSample || state.lastUnmatchedIsbn}"）― 下のボタンから検索可`;
+        } else if (Date.now() < (state.unmatchedAlertUntilMs || 0)) {
+          // 該当なし警告表示中（3.5秒間）は赤ピル表示を維持して見落としを防ぐ
+          statusPill.style.backgroundColor = "rgba(185, 28, 28, 0.94)";
+          statusPill.style.color = "#ffffff";
+        } else {
+          statusPill.style.backgroundColor = "rgba(15, 23, 42, 0.82)";
+          statusPill.style.color = "#38bdf8";
+          statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
         }
-      } else {
+      } else if (Date.now() >= (state.unmatchedAlertUntilMs || 0)) {
+        statusPill.style.backgroundColor = "rgba(15, 23, 42, 0.82)";
+        statusPill.style.color = "#38bdf8";
         statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
       }
     } catch (err) {
