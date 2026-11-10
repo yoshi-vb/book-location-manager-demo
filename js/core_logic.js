@@ -174,11 +174,39 @@
     const noisyPatterns = /^(printed in|http|tel|fax|〒|\d{3}-\d{4}|落丁|乱丁|無断転載|本書の|定価|コード)/i;
     const meaningfulLines = lines.filter((l) => l.length >= 3 && !noisyPatterns.test(l));
 
+    // 4. 「今カメラに奥付ページが映っているか」の紙面判定（DB登録項目とは無関係・本の印字定型語のみで判定）
+    const colophonSignalRegex = /(発行|印刷|初版|第\d+刷|著者|編者|編著|監修|発行者|発行所|印刷所|出版|書店|文庫|新書|定価|ISBN|コード|落丁|乱丁|無断転載|〒\s*\d{3}|Printed\s+in)/gi;
+    const colophonMatches = text.match(colophonSignalRegex) || [];
+    const uniqueColophonSignals = Array.from(new Set(colophonMatches.map((m) => m.trim())));
+    const isColophonPage =
+      exactIsbns.length > 0 ||
+      fuzzyIsbnPrefixes.length > 0 ||
+      (uniqueColophonSignals.length >= 2 && meaningfulLines.length >= 1) ||
+      (uniqueColophonSignals.length >= 1 && meaningfulLines.length >= 3);
+
+    // 5. 該当なし時にワンタップで手動検索へ引き継ぐための抽出キーワード候補
+    const genericLabelRegex = /^(著者|編者|編著|監修|発行者|発行所|印刷所|発行|印刷|株式会社|有限会社|定価|初版.*|第\d+刷.*|\d{4}年.*|ISBN.*)$/g;
+    const searchKeywords = [];
+    for (const line of meaningfulLines) {
+      const cleanedLine = line
+        .replace(/^(書名|タイトル|著者|編者|発行所|発行|印刷所|印刷|発売)\s*[:：]?\s*/g, "")
+        .replace(/株式会社|有限会社/g, "")
+        .trim();
+      if (cleanedLine.length >= 3 && !genericLabelRegex.test(cleanedLine) && !/^[0-9\-‐−ー\s:：()（）]+$/.test(cleanedLine)) {
+        const kw = cleanedLine.slice(0, 18);
+        if (!searchKeywords.includes(kw)) searchKeywords.push(kw);
+      }
+      if (searchKeywords.length >= 5) break;
+    }
+
     return {
       rawText: text,
       exactIsbns: Array.from(new Set(exactIsbns)),
       fuzzyIsbnPrefixes,
-      lines: meaningfulLines
+      lines: meaningfulLines,
+      isColophonPage,
+      colophonSignals: uniqueColophonSignals,
+      searchKeywords
     };
   }
 
@@ -258,6 +286,21 @@
           score += 45;
           isFuzzyHit = true;
           reasons.push("書名類似一致（一部OCR誤読の可能性）");
+        } else {
+          // ISBN・著者・出版社がDBに未登録でも、書名内の特徴的な5文字チャンクが奥付から読めていればヒットさせる
+          let matchedChunk = "";
+          for (let i = 0; i <= mainTitleNorm.length - 5; i++) {
+            const chunk = mainTitleNorm.slice(i, i + 5);
+            if (normFullOcr.includes(chunk)) {
+              matchedChunk = chunk;
+              break;
+            }
+          }
+          if (matchedChunk) {
+            score += 45;
+            isFuzzyHit = true;
+            reasons.push(`書名フレーズ一致 (${matchedChunk})`);
+          }
         }
       }
 
