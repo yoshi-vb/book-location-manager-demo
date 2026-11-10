@@ -165,8 +165,10 @@
         <!-- (A) 実機カメラ連続読取パネル -->
         <div id="scanPanelCamera">
           <div class="alert alert-info" style="font-size:0.8rem; padding:8px 10px;">
-            <strong>連続スキャンについて:</strong> カメラ開始後、シャッターを押さなくても約2秒ごとにフレームから文字・ISBNを自動解析し候補を表示します。<br/>
-            ※同じ本を続けて映しても勝手に確定・二重追加はされません。必ず下の候補リストから人が選択してください。
+            <strong>連続スキャンについて:</strong> カメラ開始後、シャッター不要で奥付（書名・ISBN等）を連続で自動解析します。<br/>
+            ・<strong>1冊該当:</strong> 待ち時間ゼロで即座に「4. スキャン完了した図書一覧」へ自動確定します（二重追加は防止されます）。<br/>
+            ・<strong>複数ヒット:</strong> ポップアップ画面が表示され、1冊タップして特定するまでスキャンを一時停止します。<br/>
+            ・<strong>該当なし:</strong> 即座に通知し、読み取った語句ボタンからワンタップで手動検索できます。
           </div>
 
           <div class="camera-box" id="cameraViewport">
