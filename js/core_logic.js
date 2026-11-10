@@ -139,8 +139,8 @@
     const exactIsbns = [];
     const fuzzyIsbnPrefixes = [];
 
-    // 1. ISBN表記行・パターンからの抽出
-    const isbnRegex = /ISBN\s*[:：]?\s*([0-9OIlZSB\-‐−ー\s]{9,22}[0-9XObIlZSB])/gi;
+    // 1. ISBN表記行・パターンからの抽出（OCRで ISBN が 1SBN / lSBN / IS8N 等に誤読されたケースも許容）
+    const isbnRegex = /(?:ISBN|[I1l|][S5][B8][NM])\s*[:：]?\s*([0-9OIlZSB\-‐−ー\s]{9,22}[0-9XObIlZSB])/gi;
     let match;
     while ((match = isbnRegex.exec(text)) !== null) {
       const strict = cleanIsbnDigits(match[1], false);
@@ -154,35 +154,52 @@
         const vFixed = validateIsbn(fixed);
         if (vFixed.isValid) {
           fuzzyIsbnPrefixes.push({ digits: vFixed.normalized, reason: "OCR文字補正一致" });
-        } else if (strict.length >= 7) {
-          fuzzyIsbnPrefixes.push({ digits: strict.slice(0, 9), reason: "ISBN部分一致（末尾かすれ等）" });
+        } else {
+          const is13Prefix = strict.startsWith("978") || strict.startsWith("979");
+          const minLen = is13Prefix ? 11 : 8;
+          if (strict.length >= minLen) {
+            fuzzyIsbnPrefixes.push({ digits: strict.slice(0, minLen), reason: "ISBN部分一致（末尾かすれ等）" });
+          }
         }
       }
     }
 
-    // 2. 978 / 979 から始まる連続数字・ハイフン列のフォールバック検出
-    const raw13Regex = /(97[89][0-9\-‐−ー\s]{9,16}[0-9])/g;
+    // 2. 978 / 979 から始まる連続数字・ハイフン列のフォールバック検出（一部文字化け・末尾かすれも救済）
+    const raw13Regex = /(97[89][0-9OIlZSB\-‐−ー\s]{8,18}[0-9XObIlZSB])/g;
     while ((match = raw13Regex.exec(text)) !== null) {
       const strict = cleanIsbnDigits(match[1], false);
       const vStrict = validateIsbn(strict);
-      if (vStrict.isValid && !exactIsbns.includes(vStrict.normalized)) {
-        exactIsbns.push(vStrict.normalized);
+      if (vStrict.isValid) {
+        if (!exactIsbns.includes(vStrict.normalized)) {
+          exactIsbns.push(vStrict.normalized);
+        }
+      } else {
+        const fixed = cleanIsbnDigits(match[1], true);
+        const vFixed = validateIsbn(fixed);
+        if (vFixed.isValid) {
+          fuzzyIsbnPrefixes.push({ digits: vFixed.normalized, reason: "OCR文字補正一致" });
+        } else if (strict.length >= 11) {
+          fuzzyIsbnPrefixes.push({ digits: strict.slice(0, 11), reason: "ISBN部分一致（末尾かすれ等）" });
+        }
       }
     }
 
-    // 3. 意味のあるテキスト行（ノイズ除去後）
+    // 3. 意味のあるテキスト行（Tesseractが日本語文字間に挿入する空白を除去してから抽出）
+    const compactLines = lines.map((l) => l.replace(/([\u3000-\u9FFF\uFF00-\uFFEF])\s+(?=[\u3000-\u9FFF\uFF00-\uFFEF])/g, "$1").trim());
     const noisyPatterns = /^(printed in|http|tel|fax|〒|\d{3}-\d{4}|落丁|乱丁|無断転載|本書の|定価|コード)/i;
-    const meaningfulLines = lines.filter((l) => l.length >= 3 && !noisyPatterns.test(l));
+    const meaningfulLines = compactLines.filter((l) => l.length >= 2 && !noisyPatterns.test(l));
 
-    // 4. 「今カメラに奥付ページが映っているか」の紙面判定（DB登録項目とは無関係・本の印字定型語のみで判定）
-    const colophonSignalRegex = /(発行|印刷|初版|第\d+刷|著者|編者|編著|監修|発行者|発行所|印刷所|出版|書店|文庫|新書|定価|ISBN|コード|落丁|乱丁|無断転載|〒\s*\d{3}|Printed\s+in)/gi;
-    const colophonMatches = text.match(colophonSignalRegex) || [];
+    // 4. 「今カメラに奥付ページが映っているか」の紙面判定（Tesseractの文字間スペースを除去した上で判定）
+    const textCompact = text.replace(/[\s　]+/g, "");
+    const jpAlnumCount = (textCompact.match(/[0-9A-Za-z\u3040-\u30FF\u4E00-\u9FFF]/g) || []).length;
+    const colophonSignalRegex = /(発行|印刷|初版|\d+刷|\d{4}年|\d+月\d+日|著者|編者|編著|監修|発行者|発行所|印刷所|出版|書店|文庫|新書|定価|本体|ISBN|1SBN|lSBN|9784|978|979|C\d{4}|コード|落丁|乱丁|無断転載|株式会社|〒\d{3}|Printed)/gi;
+    const colophonMatches = textCompact.match(colophonSignalRegex) || [];
     const uniqueColophonSignals = Array.from(new Set(colophonMatches.map((m) => m.trim())));
     const isColophonPage =
       exactIsbns.length > 0 ||
       fuzzyIsbnPrefixes.length > 0 ||
-      (uniqueColophonSignals.length >= 2 && meaningfulLines.length >= 1) ||
-      (uniqueColophonSignals.length >= 1 && meaningfulLines.length >= 3);
+      (uniqueColophonSignals.length >= 1 && jpAlnumCount >= 4) ||
+      (jpAlnumCount >= 12 && meaningfulLines.length >= 2);
 
     // 5. 該当なし時にワンタップで手動検索へ引き継ぐための抽出キーワード候補
     const genericLabelRegex = /^(著者|編者|編著|監修|発行者|発行所|印刷所|発行|印刷|株式会社|有限会社|定価|初版.*|第\d+刷.*|\d{4}年.*|ISBN.*)$/g;
@@ -192,7 +209,7 @@
         .replace(/^(書名|タイトル|著者|編者|発行所|発行|印刷所|印刷|発売)\s*[:：]?\s*/g, "")
         .replace(/株式会社|有限会社/g, "")
         .trim();
-      if (cleanedLine.length >= 3 && !genericLabelRegex.test(cleanedLine) && !/^[0-9\-‐−ー\s:：()（）]+$/.test(cleanedLine)) {
+      if (cleanedLine.length >= 2 && !genericLabelRegex.test(cleanedLine) && !/^[0-9\-‐−ー\s:：()（）]+$/.test(cleanedLine)) {
         const kw = cleanedLine.slice(0, 18);
         if (!searchKeywords.includes(kw)) searchKeywords.push(kw);
       }
@@ -227,6 +244,7 @@
       const reasons = [];
       let isExactIsbnHit = false;
       let isFuzzyHit = false;
+      let hasPrimaryHit = false;
 
       const bookIsbnInfo = validateIsbn(book.isbn);
       const bookIsbnNorm = bookIsbnInfo.normalized;
@@ -240,16 +258,25 @@
         ) {
           score += 100;
           isExactIsbnHit = true;
+          hasPrimaryHit = true;
           reasons.push(`ISBN一致 (${book.isbn})`);
         }
       }
 
+      // カメラで有効なISBNが明確に読み取れているのに、DB側の登録ISBNと明確に食い違う場合は別図書と判定
+      const hasContradictingIsbn =
+        features.exactIsbns.length > 0 && Boolean(bookIsbnNorm) && !isExactIsbnHit;
+
       // 2. ISBN部分一致・OCR補正一致チェック
-      if (!isExactIsbnHit && bookIsbnNorm && features.fuzzyIsbnPrefixes.length > 0) {
+      if (!isExactIsbnHit && !hasContradictingIsbn && bookIsbnNorm && features.fuzzyIsbnPrefixes.length > 0) {
         for (const fz of features.fuzzyIsbnPrefixes) {
-          if (bookIsbnNorm.includes(fz.digits) || fz.digits.includes(bookIsbnNorm.slice(0, 9))) {
+          if (
+            bookIsbnNorm.includes(fz.digits) ||
+            (bookIsbn13Eq && bookIsbn13Eq.includes(fz.digits))
+          ) {
             score += 55;
             isFuzzyHit = true;
+            hasPrimaryHit = true;
             reasons.push(`${fz.reason} (${book.isbn})`);
             break;
           }
@@ -266,6 +293,7 @@
 
       if (fullTitleNorm.length >= 4 && normFullOcr.includes(fullTitleNorm)) {
         score += 75;
+        hasPrimaryHit = true;
         reasons.push("書名完全一致");
       } else if (mainTitleNorm.length >= 4 && normFullOcr.includes(mainTitleNorm)) {
         // 著者略歴内の『別書名』引用による誤爆を抑えるため、カギ括弧『』内だけの一致か確認
@@ -276,15 +304,17 @@
           reasons.push("書名部分一致（※著者略歴等の引用の可能性あり）");
         } else {
           score += 65;
+          hasPrimaryHit = true;
           reasons.push(`書名主要部一致 (${mainTitleRaw})`);
         }
-      } else if (mainTitleNorm.length >= 5) {
+      } else if (!hasContradictingIsbn && mainTitleNorm.length >= 5) {
         // 先頭または末尾がOCR文字化け（例: AI -> A1）している場合のN-gram/部分文字列照合
         const tailSub = mainTitleNorm.slice(2);
         const headSub = mainTitleNorm.slice(0, Math.max(4, mainTitleNorm.length - 2));
         if ((tailSub.length >= 4 && normFullOcr.includes(tailSub)) || (headSub.length >= 4 && normFullOcr.includes(headSub))) {
           score += 45;
           isFuzzyHit = true;
+          hasPrimaryHit = true;
           reasons.push("書名類似一致（一部OCR誤読の可能性）");
         } else {
           // ISBN・著者・出版社がDBに未登録でも、書名内の特徴的な5文字チャンクが奥付から読めていればヒットさせる
@@ -299,6 +329,7 @@
           if (matchedChunk) {
             score += 45;
             isFuzzyHit = true;
+            hasPrimaryHit = true;
             reasons.push(`書名フレーズ一致 (${matchedChunk})`);
           }
         }
@@ -335,10 +366,11 @@
       const idNorm = normalizeText(book.book_id);
       if (idNorm.length >= 4 && normFullOcr.includes(idNorm)) {
         score += 90;
+        hasPrimaryHit = true;
         reasons.push(`図書登録番号一致 (${book.book_id})`);
       }
 
-      if (score >= 40) {
+      if (score >= 40 && hasPrimaryHit) {
         scoredMap.set(book.book_id, {
           book,
           score,
