@@ -189,17 +189,26 @@
     const noisyPatterns = /^(printed in|http|tel|fax|〒|\d{3}-\d{4}|落丁|乱丁|無断転載|本書の|定価|コード)/i;
     const meaningfulLines = compactLines.filter((l) => l.length >= 2 && !noisyPatterns.test(l));
 
-    // 4. 「今カメラに奥付ページが映っているか」の紙面判定（Tesseractの文字間スペースを除去した上で判定）
+    // 4. 「今カメラに奥付ページが映っているか」の厳格な紙面判定（表紙・本文・机・背景での誤警告を防止）
     const textCompact = text.replace(/[\s　]+/g, "");
-    const jpAlnumCount = (textCompact.match(/[0-9A-Za-z\u3040-\u30FF\u4E00-\u9FFF]/g) || []).length;
-    const colophonSignalRegex = /(発行|印刷|初版|\d+刷|\d{4}年|\d+月\d+日|著者|編者|編著|監修|発行者|発行所|印刷所|出版|書店|文庫|新書|定価|本体|ISBN|1SBN|lSBN|9784|978|979|C\d{4}|コード|落丁|乱丁|無断転載|株式会社|〒\d{3}|Printed)/gi;
-    const colophonMatches = textCompact.match(colophonSignalRegex) || [];
-    const uniqueColophonSignals = Array.from(new Set(colophonMatches.map((m) => m.trim())));
+    const strictSignalPatterns = [
+      { key: "PUBLISHER", re: /発行所|発行者/i },
+      { key: "PRINTER", re: /印刷所|製本所/i },
+      { key: "EDITION", re: /初版|第\d+刷/i },
+      { key: "PRICE", re: /定価|本体\d+/i },
+      { key: "ISBN_LABEL", re: /ISBN|1SBN|lSBN/i },
+      { key: "DEFECT_NOTICE", re: /落丁|乱丁|無断転載/i },
+      { key: "POSTAL", re: /〒\d{3}/i },
+      { key: "PRINTED_IN", re: /Printedin/i }
+    ];
+    const uniqueColophonSignals = strictSignalPatterns
+      .filter((p) => p.re.test(textCompact))
+      .map((p) => p.key);
+
     const isColophonPage =
       exactIsbns.length > 0 ||
-      fuzzyIsbnPrefixes.length > 0 ||
-      (uniqueColophonSignals.length >= 1 && jpAlnumCount >= 4) ||
-      (jpAlnumCount >= 12 && meaningfulLines.length >= 2);
+      (fuzzyIsbnPrefixes.length > 0 && uniqueColophonSignals.length >= 1) ||
+      (uniqueColophonSignals.length >= 3 && meaningfulLines.length >= 2);
 
     // 5. 該当なし時にワンタップで手動検索へ引き継ぐための抽出キーワード候補
     const genericLabelRegex = /^(著者|編者|編著|監修|発行者|発行所|印刷所|発行|印刷|株式会社|有限会社|定価|初版.*|第\d+刷.*|\d{4}年.*|ISBN.*)$/g;
@@ -245,6 +254,7 @@
       let isExactIsbnHit = false;
       let isFuzzyHit = false;
       let hasPrimaryHit = false;
+      let isStrongTitleOrIsbnHit = false;
 
       const bookIsbnInfo = validateIsbn(book.isbn);
       const bookIsbnNorm = bookIsbnInfo.normalized;
@@ -259,6 +269,7 @@
           score += 100;
           isExactIsbnHit = true;
           hasPrimaryHit = true;
+          isStrongTitleOrIsbnHit = true;
           reasons.push(`ISBN一致 (${book.isbn})`);
         }
       }
@@ -294,6 +305,7 @@
       if (fullTitleNorm.length >= 4 && normFullOcr.includes(fullTitleNorm)) {
         score += 75;
         hasPrimaryHit = true;
+        isStrongTitleOrIsbnHit = true;
         reasons.push("書名完全一致");
       } else if (mainTitleNorm.length >= 4 && normFullOcr.includes(mainTitleNorm)) {
         // 著者略歴内の『別書名』引用による誤爆を抑えるため、カギ括弧『』内だけの一致か確認
@@ -305,25 +317,30 @@
         } else {
           score += 65;
           hasPrimaryHit = true;
+          isStrongTitleOrIsbnHit = true;
           reasons.push(`書名主要部一致 (${mainTitleRaw})`);
         }
       } else if (!hasContradictingIsbn && mainTitleNorm.length >= 5) {
         // 先頭または末尾がOCR文字化け（例: AI -> A1）している場合のN-gram/部分文字列照合
         const tailSub = mainTitleNorm.slice(2);
         const headSub = mainTitleNorm.slice(0, Math.max(4, mainTitleNorm.length - 2));
-        if ((tailSub.length >= 4 && normFullOcr.includes(tailSub)) || (headSub.length >= 4 && normFullOcr.includes(headSub))) {
+        if ((tailSub.length >= 5 && normFullOcr.includes(tailSub)) || (headSub.length >= 5 && normFullOcr.includes(headSub))) {
           score += 45;
           isFuzzyHit = true;
           hasPrimaryHit = true;
           reasons.push("書名類似一致（一部OCR誤読の可能性）");
         } else {
-          // ISBN・著者・出版社がDBに未登録でも、書名内の特徴的な5文字チャンクが奥付から読めていればヒットさせる
+          // 第1優先（ISBN・書名主要部全体）が読めなかった時の救済：書名主要部の60%以上（最低6文字以上）の固有フレーズ一致のみ許可
+          const genericPhraseRegex = /^(マネジメント|ハンドブック|実務マニュアル|ガイドブック|の基礎知識|入門ガイド|実務の手引き|ケーススタディ)$/;
+          const chunkLen = Math.max(6, Math.ceil(mainTitleNorm.length * 0.6));
           let matchedChunk = "";
-          for (let i = 0; i <= mainTitleNorm.length - 5; i++) {
-            const chunk = mainTitleNorm.slice(i, i + 5);
-            if (normFullOcr.includes(chunk)) {
-              matchedChunk = chunk;
-              break;
+          if (mainTitleNorm.length >= chunkLen) {
+            for (let i = 0; i <= mainTitleNorm.length - chunkLen; i++) {
+              const chunk = mainTitleNorm.slice(i, i + chunkLen);
+              if (!genericPhraseRegex.test(chunk) && normFullOcr.includes(chunk)) {
+                matchedChunk = chunk;
+                break;
+              }
             }
           }
           if (matchedChunk) {
@@ -367,6 +384,7 @@
       if (idNorm.length >= 4 && normFullOcr.includes(idNorm)) {
         score += 90;
         hasPrimaryHit = true;
+        isStrongTitleOrIsbnHit = true;
         reasons.push(`図書登録番号一致 (${book.book_id})`);
       }
 
@@ -376,6 +394,7 @@
           score,
           isExactIsbnHit,
           isFuzzyHit,
+          isStrongTitleOrIsbnHit,
           reasons
         });
       }
@@ -386,11 +405,16 @@
       return String(a.book.book_id).localeCompare(String(b.book.book_id));
     });
 
-    // ISBN完全一致かつ書名一致する強い候補（140点以上）が存在する場合、
-    // 著者略歴内の他書引用や著者名・出版社だけの一致による低スコアノイズ（80点未満）を除外する
-    const maxScore = candidates.length > 0 ? candidates[0].score : 0;
-    if (maxScore >= 140) {
-      candidates = candidates.filter((c) => c.score >= 80 || c.isExactIsbnHit);
+    // 【2段階フィルタ】
+    // 第1優先（ISBN完全一致・書名完全一致・書名主要部一致・登録番号一致）の候補が1冊でも存在する場合は、
+    // 部分文字列だけで引っかかった「似た書名の別図書（!isStrongTitleOrIsbnHit）」を完全に除外する
+    if (candidates.some((c) => c.isStrongTitleOrIsbnHit)) {
+      candidates = candidates.filter((c) => c.isStrongTitleOrIsbnHit);
+    }
+
+    // さらにISBN完全一致が存在する場合、ISBN不一致の低スコア候補を除外する
+    if (candidates.some((c) => c.isExactIsbnHit)) {
+      candidates = candidates.filter((c) => c.isExactIsbnHit || c.score >= 90);
     }
 
     // ステータス判定
