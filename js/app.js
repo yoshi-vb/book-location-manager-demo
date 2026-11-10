@@ -505,28 +505,45 @@
     // A. 蔵書リストに該当するものがない場合
     if (matchResult.candidates.length === 0) {
       const isColophonDetected = features.exactIsbns.length > 0 || Boolean(features.isColophonPage);
-      // 連続カメラの自動スキャン中は、机や背景など「奥付ページではないフレーム」は静かにスルーし、未登録本のロックも解除する
+      // 連続カメラの自動スキャン中は、机や背景など「奥付ページではないフレーム」は静かにスルーし、連続4フレームで未登録本ロックを解除する
       if (isContinuousCamera && !isColophonDetected) {
-        state.lastUnmatchedIsbn = "";
+        state.unmatchedColophonStreak = 0;
+        state.nonColophonStreak = (state.nonColophonStreak || 0) + 1;
+        if (state.nonColophonStreak >= 4) {
+          state.unmatchedAlertActive = false;
+          state.lastUnmatchedIsbn = "";
+        }
         return { matched: false, count: 0, status: "RESTING_NON_COLOPHON" };
       }
+
+      state.nonColophonStreak = 0;
       const detectedSample =
         features.exactIsbns[0] ||
         features.fuzzyIsbnPrefixes[0]?.digits ||
         features.searchKeywords?.[0] ||
         (features.lines[0] ? features.lines[0].slice(0, 22) : "読取文字");
 
-      const nowMs = Date.now();
-      // 同じ未登録本をかざし続けている3.5秒間は連続で何度も警告音が鳴らないようにする
-      if (
-        isContinuousCamera &&
-        state.lastUnmatchedIsbn === detectedSample &&
-        nowMs < (state.unmatchedAlertUntilMs || 0)
-      ) {
-        return { matched: false, count: 0, status: "NO_CANDIDATE_HOLD", detectedSample };
+      // すでにこの未登録図書について1回警告を出してロック中の場合は、手元の揺れや時間経過で読取文字が変わっても2回目の警告は一切鳴らさない
+      if (isContinuousCamera && state.unmatchedAlertActive) {
+        return {
+          matched: false,
+          count: 0,
+          status: "NO_CANDIDATE_HOLD",
+          detectedSample: state.lastUnmatchedIsbn || detectedSample
+        };
       }
+
+      // ISBN完全一致がない場合（奥付定型語による検出時）は、本を持ち替える途中の誤反応を防ぐため連続2フレーム検出を必須とする
+      if (isContinuousCamera && features.exactIsbns.length === 0) {
+        state.unmatchedColophonStreak = (state.unmatchedColophonStreak || 0) + 1;
+        if (state.unmatchedColophonStreak < 2) {
+          return { matched: false, count: 0, status: "RESTING_NON_COLOPHON" };
+        }
+      }
+
+      state.unmatchedAlertActive = true;
       state.lastUnmatchedIsbn = detectedSample;
-      state.unmatchedAlertUntilMs = nowMs + 3500;
+      state.unmatchedAlertUntilMs = Date.now() + 3500;
 
       state.mobileLastMatchInfo = {
         sourceLabel,
@@ -543,6 +560,9 @@
       return { matched: false, count: 0, status: "NO_CANDIDATE", detectedSample };
     }
 
+    state.unmatchedAlertActive = false;
+    state.unmatchedColophonStreak = 0;
+    state.nonColophonStreak = 0;
     state.lastUnmatchedIsbn = "";
     state.unmatchedAlertUntilMs = 0;
     state.mobileLastMatchInfo = {
@@ -1154,10 +1174,18 @@
           statusPill.style.color = "#38bdf8";
           statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
         }
-      } else if (Date.now() >= (state.unmatchedAlertUntilMs || 0)) {
-        statusPill.style.backgroundColor = "rgba(15, 23, 42, 0.82)";
-        statusPill.style.color = "#38bdf8";
-        statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
+      } else {
+        state.unmatchedColophonStreak = 0;
+        state.nonColophonStreak = (state.nonColophonStreak || 0) + 1;
+        if (state.nonColophonStreak >= 4) {
+          state.unmatchedAlertActive = false;
+          state.lastUnmatchedIsbn = "";
+        }
+        if (Date.now() >= (state.unmatchedAlertUntilMs || 0)) {
+          statusPill.style.backgroundColor = "rgba(15, 23, 42, 0.82)";
+          statusPill.style.color = "#38bdf8";
+          statusPill.textContent = `🟢 高速連続読取中（確定済: ${state.mobileSelectedList.length}冊 / 奥付をかざしてください）`;
+        }
       }
     } catch (err) {
       statusPill.textContent = "ブラウザ内OCR待機中（オフライン時は下のテキスト認識入力をご利用ください）";
