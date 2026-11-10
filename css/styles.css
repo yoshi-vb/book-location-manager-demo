@@ -338,11 +338,10 @@ body {
   border-left-color: var(--success);
 }
 
-/* カメラ・連続読取ビューポート（iPhone縦持ちで映像とガイド枠が絶対にズレない構造） */
+/* カメラ・連続読取ビューポート（iPhone縦持ちで停止→再開しても両端に黒帯が出ず全面表示される構造） */
 .camera-box {
   position: relative;
   width: 100%;
-  aspect-ratio: 4 / 3;
   height: 260px;
   background-color: #0f172a;
   border-radius: 10px;
@@ -354,13 +353,16 @@ body {
 
 .camera-box video {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  inset: 0;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 100%;
+  min-height: 100%;
+  object-fit: cover !important;
   object-position: center center;
   display: block;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
 }
 
 .camera-guide-overlay {
